@@ -19,20 +19,9 @@ def load_map(path):
     return entries, [e[0] for e in entries]
 
 
-def main():
-    args = [a for a in sys.argv[1:]]
-    base = 0
-    top = 40
-    if '--base' in args:
-        i = args.index('--base')
-        base = int(args[i + 1], 16)
-        del args[i:i + 2]
-    if '--top' in args:
-        i = args.index('--top')
-        top = int(args[i + 1])
-        del args[i:i + 2]
-    sample, jit_map = args[0], args[1]
-    want = args[2] if len(args) > 2 else None
+def guest_samples(sample, jit_map, want=None):
+    """Self samples per guest block in translated code: (Counter guest rip -> samples, samples on
+    the selected threads, samples in translated code, samples not in the map)."""
     entries, starts = load_map(jit_map)
     lines = open(sample, errors='replace').read().split('\n')
     start = next(i for i, l in enumerate(lines) if l.startswith('Call graph:'))
@@ -82,7 +71,22 @@ def main():
             by_block[entries[i][2]] += n
         else:
             unmapped += n
-    jit_total = sum(self_by_address.values())
+    return by_block, total, sum(self_by_address.values()), unmapped
+
+
+def main():
+    args = [a for a in sys.argv[1:]]
+    base = 0
+    top = 40
+    if '--base' in args:
+        i = args.index('--base')
+        base = int(args[i + 1], 16)
+        del args[i:i + 2]
+    if '--top' in args:
+        i = args.index('--top')
+        top = int(args[i + 1])
+        del args[i:i + 2]
+    by_block, total, jit_total, unmapped = guest_samples(args[0], args[1], args[2] if len(args) > 2 else None)
     print(f'{total} samples on the selected threads, {jit_total} in translated code '
           f'({unmapped} not in the map), {len(by_block)} guest blocks')
     for guest, n in by_block.most_common(top):
@@ -90,4 +94,5 @@ def main():
         print(f'{n:7d} {100.0 * n / max(jit_total, 1):5.1f}%  {guest:#x}{offset}')
 
 
-main()
+if __name__ == '__main__':
+    main()
