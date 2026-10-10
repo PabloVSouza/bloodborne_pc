@@ -50,10 +50,11 @@ if [[ ${TRACE:-0} == 1 ]]; then
         --time-limit "${TRACE_SECONDS:-5}s" --output "$base.trace" > /dev/null 2>&1 &&
         echo "trace: $base.trace" || echo "trace failed"
 fi
-# SAMPLE=1: call stacks of every thread for 5 s (macOS sample), $base.sample.txt.
+# SAMPLE=1: call stacks of every thread (macOS sample), $base.sample.txt: SAMPLE_SECONDS (5) long,
+# SAMPLE_DELAY (5) s after the level loaded.
 if [[ ${SAMPLE:-0} == 1 ]]; then
-    sleep 5
-    sample "$(pgrep -x bb-probe | head -1)" 5 -file "$PWD/$base.sample.txt" > /dev/null 2>&1 &&
+    sleep "${SAMPLE_DELAY:-5}"
+    sample "$(pgrep -x bb-probe | head -1)" "${SAMPLE_SECONDS:-5}" -file "$PWD/$base.sample.txt" > /dev/null 2>&1 &&
         echo "sample: $base.sample.txt" || echo "sample failed"
 fi
 # GPU utilization (IOAccelerator, no sudo needed) and the game's CPU use, once a second.
