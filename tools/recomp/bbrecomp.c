@@ -1,6 +1,7 @@
 /* tools/recomp/bbrecomp.c ELF FUNCTIONS_TSV OUT.c OFFSET...: the recompiler (docs/RECOMPILATION.md). Writes
  * one C function per game function (image offsets; sizes from tools/recomp/scan.c's functions.tsv)
- * against src/recomp/rc.h, and the library's entry point. Build: tools/recomp/recomp.sh.
+ * against src/recomp/rc.h, in files OUT_<n>.c, and the library's table and entry point in OUT.c.
+ * Build: tools/recomp/recomp.sh.
  *
  * Generated code keeps the guest registers in a local array and the flags lazily; every
  * instruction gets a label. Instructions the generator does not translate run in the interpreter
@@ -691,12 +692,32 @@ static Insn *decode(Function fn, size_t *count) {
 static int snippet_mode;
 static uint64_t snippet_line;
 
+static int by_offset(const void *a, const void *b) {
+    const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
+}
+
 static void generate(Function fn, uint64_t *stats) {
     size_t count;
     Insn *list = decode(fn, &count);
     const Range f = {fn.offset, fn.offset + fn.size};
+    /* Labels only where a direct jump goes (and the entry): every other address an indirect jump
+     * or an interpreted branch reaches goes back to the translator (L_dispatch). */
+    uint64_t *targets = malloc((count + 1) * sizeof(*targets));
+    size_t target_count = 0;
+    targets[target_count++] = f.start;
+    for (size_t i = 0; i < count; ++i) {
+        const BbInsn *in = &list[i].in;
+        const int cc = cc_of(in->mnemonic);
+        if (((cc >= 0 && cc < 16) || in->mnemonic == M(JMP)) && in->op[0].type == OP_IMM) {
+            const uint64_t t = list[i].off + (uint64_t)in->op[0].disp;
+            if (t >= f.start && t < f.end) targets[target_count++] = t;
+        }
+    }
+    qsort(targets, target_count, sizeof(*targets), by_offset);
     emit("\n/* 0x%" PRIx64 ", %" PRIu64 " bytes, %zu instructions */\n", fn.offset, fn.size, count);
-    emit("static void %s_%" PRIx64 "(BbCpu *c) {\n", snippet_mode ? "s" : "f", snippet_mode ? snippet_line : fn.offset);
+    if (snippet_mode) emit("static void s_%" PRIx64 "(BbCpu *c) {\n", snippet_line);
+    else emit("__attribute__((visibility(\"hidden\"))) void f_%" PRIx64 "(BbCpu *c) {\n", fn.offset);
     emit("    const uint64_t B = rc->image_base;\n");
     emit("    uint64_t r[16];\n    " RELOAD "\n");
     emit("    int fk = FK_CPU, fz = 8, fcf = 0;\n    uint64_t fa = 0, fb = 0, fr = 0, dn = 0;\n");
@@ -704,7 +725,7 @@ static void generate(Function fn, uint64_t *stats) {
     emit("    (void)fa; (void)fb; (void)fr; (void)fz; (void)fcf; (void)entry_rsp; (void)dn;\n");
     for (size_t i = 0; i < count; ++i) {
         const Insn *x = &list[i];
-        emit("L_%" PRIx64 ": ", x->off);
+        if (bsearch(&x->off, targets, target_count, sizeof(*targets), by_offset)) emit("L_%" PRIx64 ": ", x->off);
         ++stats[2];
         if (translate(f, x->off, &x->in, stats)) {
             ++stats[0];
@@ -718,11 +739,13 @@ static void generate(Function fn, uint64_t *stats) {
     if (snippet_mode) emit("    " SPILL " " FLAGS_OUT " c->rip = B + 0x%" PRIx64 "ull; return;\n", f.end);
     emit("    dn = B + 0x%" PRIx64 "ull; /* past the end */\n", f.end);
     emit("L_dispatch:\n    switch (dn - B) {\n");
-    for (size_t i = 0; i < count; ++i) emit("    case 0x%" PRIx64 ": goto L_%" PRIx64 ";\n", list[i].off, list[i].off);
+    for (size_t i = 0; i < target_count; ++i)
+        if (!i || targets[i] != targets[i - 1]) emit("    case 0x%" PRIx64 ": goto L_%" PRIx64 ";\n", targets[i], targets[i]);
     emit("    default: break;\n    }\n");
     emit("    " SPILL " " FLAGS_OUT "\n    c->rip = dn;\n");
     emit("    if (dn - B >= 0x%" PRIx64 "ull && dn - B < 0x%" PRIx64 "ull) rc->bail(c, entry_rsp); /* into the function: the translator */\n", f.start, f.end);
     emit("    else rc->tail(c); /* out of it: a tail call */\n}\n");
+    free(targets);
     free(list);
 }
 
@@ -797,13 +820,31 @@ int main(int argc, char **argv) {
         if (!size) { fprintf(stderr, "%#" PRIx64 ": not in %s\n", offset, argv[2]); return 1; }
         functions[function_count++] = (Function){offset, size};
     }
+    /* The functions in files of about CHUNK instructions (OUT_<n>.c, compiled in parallel), the
+     * table in OUT.c. */
+    enum { CHUNK = 20000 };
+    char path[1024];
+    const size_t stem = strlen(argv[3]) - (strlen(argv[3]) > 2 && !strcmp(argv[3] + strlen(argv[3]) - 2, ".c") ? 2 : 0);
+    uint64_t stats[3] = {0, 0, 0}; /* translated, indirect jumps, instructions */
+    int files = 0;
+    out = NULL;
+    for (size_t i = 0; i < function_count; ++i) {
+        if (!out || stats[2] >= (uint64_t)files * CHUNK) {
+            if (out) fclose(out);
+            snprintf(path, sizeof(path), "%.*s_%d.c", (int)stem, argv[3], files++);
+            out = fopen(path, "w");
+            if (!out) { perror(path); return 1; }
+            emit("/* Written by tools/recomp/bbrecomp.c from the game's eboot.bin: not to be distributed. */\n");
+            emit("#include \"recomp/rc.h\"\n\nextern const RcApi *rc;\n");
+        }
+        generate(functions[i], stats);
+    }
+    if (out) fclose(out);
     out = fopen(argv[3], "w");
     if (!out) { perror(argv[3]); return 1; }
     emit("/* Written by tools/recomp/bbrecomp.c from the game's eboot.bin: not to be distributed. */\n");
-    emit("#include \"recomp/rc.h\"\n\nstatic const RcApi *rc;\n");
-    for (size_t i = 0; i < function_count; ++i) emit("static void f_%" PRIx64 "(BbCpu *c);\n", functions[i].offset);
-    uint64_t stats[3] = {0, 0, 0}; /* translated, indirect jumps, instructions */
-    for (size_t i = 0; i < function_count; ++i) generate(functions[i], stats);
+    emit("#include \"recomp/rc.h\"\n\n__attribute__((visibility(\"hidden\"))) const RcApi *rc;\n");
+    for (size_t i = 0; i < function_count; ++i) emit("void f_%" PRIx64 "(BbCpu *c);\n", functions[i].offset);
     emit("\nstatic const RcFunction table[] = {\n");
     for (size_t i = 0; i < function_count; ++i)
         emit("    {0x%" PRIx64 ", %" PRIu64 ", 0x%" PRIx64 "ull, f_%" PRIx64 "},\n", functions[i].offset,
@@ -811,7 +852,7 @@ int main(int argc, char **argv) {
     emit("};\n\nconst RcFunction *bb_recomp_init(const RcApi *api, size_t *count) {\n");
     emit("    rc = api;\n    *count = sizeof(table) / sizeof(table[0]);\n    return table;\n}\n");
     fclose(out);
-    printf("%zu functions, %" PRIu64 " instructions: %" PRIu64 " in C (%.0f%%), the rest in the interpreter\n",
-           function_count, stats[2], stats[0], stats[2] ? 100.0 * (double)stats[0] / (double)stats[2] : 0.0);
+    printf("%zu functions, %" PRIu64 " instructions: %" PRIu64 " in C (%.0f%%), the rest in the interpreter; %d files\n",
+           function_count, stats[2], stats[0], stats[2] ? 100.0 * (double)stats[0] / (double)stats[2] : 0.0, files);
     return 0;
 }
