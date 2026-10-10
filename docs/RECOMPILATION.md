@@ -50,9 +50,10 @@ The recompiled code is produced on the player's machine from their copy, and sta
 
 ## The recompiler
 
-`tools/recomp/bbrecomp.c` reads `eboot.bin`, takes functions from the unwind tables, and writes one
-C function per game function against `src/recomp/rc.h`; `tools/recomp/recomp.sh` compiles them into
-a library:
+`tools/recomp/bbrecomp.c` reads `eboot.bin`, takes functions from the function table
+(`tools/recomp/scan.c`), and writes one C function per game function against `src/recomp/rc.h`;
+`tools/recomp/recomp.sh` compiles them into a library, one file per 128 KiB of the image, compiling
+again only the files whose C changed:
 
 - The code is decoded by following its control flow from the entry. Jumps become `goto`s (labels
   only where something jumps); returns become C returns. Calls of other recompiled functions are
@@ -68,10 +69,16 @@ a library:
   time, so the output is complete from the start.
 - An indirect jump to an unknown place goes back to the translator; a jump out of the function is
   a tail call.
+- Left to the translator: the import stubs (one jump each to the PS4 libraries) and the functions
+  that call `setjmp` (its return point must be guest code that can be resumed).
+- A call the runtime runs in the translator gets a return address of its own; when a `longjmp` or
+  an exception leaves several of them at once, the runtime goes back to the right one on the host
+  as well.
 
 The game loads the library (`BB_RECOMP_LIB`) after its patches: a function whose code changed since
 it was generated (a game patch, a hook: `bbcpu_recomp_hash`) stays with the translator.
-`BB_RECOMP_OFF=OFFSET,...` switches chosen ones off, `BB_RECOMP_THREADS` / `BB_RECOMP_NOT_THREADS`
+`BB_RECOMP_OFF=OFFSET,...` (or `@FILE`) switches chosen ones off, `BB_RECOMP_ONLY` keeps only the
+listed ones (bisecting), `BB_RECOMP_THREADS` / `BB_RECOMP_NOT_THREADS`
 limit them to some threads (by name), `BB_RECOMP_NODIRECT=1` sends every call through the
 translator. Translated code calls recompiled functions directly.
 
@@ -98,13 +105,29 @@ or memory other threads change). What the checks found along the way:
 - Speed: a shared counter of recompiled calls (every thread adding to it) and the runtime between
   recompiled functions cost 11 FPS; the instructions left to the interpreter, 7 more.
 
+Coverage (2026-10-10): the unwind tables list 162,959 functions; leaf functions often have none.
+The scanner now also follows direct calls, jumps, code addresses taken with `lea` and the code
+pointers relocations put into data (vtables): 241,821 functions, and every block the game ran on a
+3-minute route through the Hunter's Dream (walking, fighting, menus) is inside one. All 49,095
+functions that route ran (3.06 million instructions, 99.8% in C) build in 3.5 minutes into a 98 MB
+library; 49,071 of them run recompiled in the game (the rest changed by its patches) at the
+translator's speed, 59.1 FPS, about 12 million recompiled calls a second. On the way:
+
+- Recompiled import stubs put the runtime's return address on the stack, which `setjmp` saved; a
+  later `longjmp` (the game's PNG reader) came back into a frame that was gone. The stubs and the
+  40 functions that call `setjmp` stay with the translator.
+- Every call the runtime ran in the translator returned to the same address: after a `longjmp` the
+  innermost one stopped where an outer one should have.
+
 ## Tools
 
 All write to `out/recomp/`.
 
 | Tool | What it does |
 |---|---|
-| `tools/recomp/scan.c` | Every function from the unwind tables (exact start and size), decoded with Zydis: `functions.tsv`, `calls.tsv`, `slots.tsv`, `strings.tsv` |
+| `tools/recomp/scan.c` | Every function: the unwind tables (exact start and size), then what calls, jumps and code pointers reach (decoded by following control flow); `functions.tsv`, `calls.tsv`, `slots.tsv`, `strings.tsv` |
+| `tools/recomp/pointers.py` | The code addresses relocations put into data (`pointers.txt`), for `scan.c` |
+| `tools/recomp/imports.py` | The import stubs by name (`imports.tsv`) |
 | `tools/recomp/label.py` | The library of each function (`modules.tsv`), from source paths and messages, spread to neighbours |
 | `tools/recomp/profile.py` | CPU time per function and library from a macOS `sample` (`profile.tsv`) |
 | `tools/recomp/inspect.sh` | Ghidra's view of chosen functions (`c/<offset>.c`, `.s`), for analysis and annotations |
@@ -117,7 +140,10 @@ All write to `out/recomp/`.
 D=deps/macos-arm64
 clang -arch arm64 -O2 -I$D/include tools/recomp/scan.c $D/lib/libZydis.a $D/lib/libZycore.a \
     -o out/recomp/scan
-out/recomp/scan out/eboot.elf out/recomp
+GAME=/path/to/CUSA03173  # the game folder (1.09)
+python3 tools/recomp/pointers.py "$GAME/eboot.bin" out/recomp/pointers.txt
+out/recomp/scan out/eboot.elf out/recomp out/recomp/pointers.txt
+python3 tools/recomp/imports.py "$GAME/eboot.bin" out/recomp
 python3 tools/recomp/label.py out/recomp
 
 # A profile: 5 s of every thread, then the main thread's functions.
