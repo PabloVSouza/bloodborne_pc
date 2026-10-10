@@ -44,5 +44,8 @@ uint64_t bbcpu_record_call(BbCpu *cpu);
 extern int bbcpu_native_count;
 extern uint64_t bbcpu_native_calls; /* calls run natively (statistics) */
 const void *bbcpu_native_at(uint64_t address);
+/* Runs native function `fn` for a guest call about to be made (its arguments in the registers,
+ * no return address pushed; interp.c). */
+void bbcpu_call_native(BbCpu *cpu, const void *fn);
 
 #endif

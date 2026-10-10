@@ -37,7 +37,7 @@ enum { T0 = 0, T1 = 1, T2 = 2, T3 = 3, T4 = 4, T5 = 5, TA = 16, TB = 17, FL = 8,
 
 enum { CODE_SIZE = 128 << 20 };
 static uint32_t *code_base, *code_end, *code_next;
-static uint32_t *enter_stub, *exit_stub, *fallback_stub;
+static uint32_t *enter_stub, *exit_stub, *fallback_stub, *native_stub;
 static pthread_mutex_t jit_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t translated_blocks, fallback_insns;
 /* Translated blocks in code order (the buffer only grows), for fault reports. */
@@ -106,6 +106,14 @@ static void jit_fallback(BbCpu *cpu, const BbInsn *in) {
     profile_note(in);
 }
 
+/* Called from translated code for a direct call of a game function with a native version
+ * (native.c): the native function runs through the guest -> host bridge, registers synced. */
+static void jit_native(BbCpu *cpu, const void *fn) {
+    jit_to_x86(cpu);
+    bbcpu_call_native(cpu, fn);
+    x86_to_jit(cpu);
+}
+
 /* ---- code buffer and stubs ---- */
 
 /* Guest xmm0-15 (the low 128 bits of ymm) live in v16-v31 inside translated code; the upper
@@ -172,6 +180,18 @@ static int jit_init(void) {
             a64_mov(&a, 1, 0, CPU);
             a64_mov(&a, 1, 1, TB);
             a64_mov_imm(&a, TA, (uint64_t)(uintptr_t)&jit_fallback);
+            a64_blr(&a, TA);
+            a64_ldp_post(&a, 29, 30, SP, 16);
+            sync_in(&a);
+            a64_ret(&a);
+            /* native: TA = guest rip, TB = the native function (jit_native). */
+            native_stub = a64_here(&a);
+            sync_out(&a);
+            a64_str_uoff(&a, 3, TA, CPU, OFF(rip));
+            a64_stp_pre(&a, 29, 30, SP, -16);
+            a64_mov(&a, 1, 0, CPU);
+            a64_mov(&a, 1, 1, TB);
+            a64_mov_imm(&a, TA, (uint64_t)(uintptr_t)&jit_native);
             a64_blr(&a, TA);
             a64_ldp_post(&a, 29, 30, SP, 16);
             sync_in(&a);
@@ -2024,6 +2044,18 @@ static int translate_insn(Tx *t, const BbInsn *in, int flags_live, int *handled)
     }
     case M(CALL): {
         const BbOp *op = &in->op[0];
+        /* A game function with a native version (native.c): called from here, no dispatcher. */
+        if (op->type == OP_IMM && bbcpu_native_count) {
+            const uint64_t callee = t->rip + (uint64_t)op->disp;
+            const void *fn = bbcpu_native_at(callee);
+            if (fn && !(bbcpu_record_armed && bbcpu_record_target(callee))) {
+                a64_mov_imm(a, TA, t->rip);
+                a64_mov_imm(a, TB, (uint64_t)(uintptr_t)fn);
+                a64_bl(a, (int32_t)(native_stub - a64_here(a)));
+                exit_to(t, next);
+                return 1;
+            }
+        }
         int target;
         if (op->type == OP_IMM) { a64_mov_imm(a, T1, t->rip + (uint64_t)op->disp); target = T1; }
         else target = read_op(t, in, op, 8, T1, NULL);

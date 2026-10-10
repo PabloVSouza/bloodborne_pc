@@ -916,6 +916,11 @@ uint64_t bbcpu_step(BbCpu *cpu, const BbInsn *in) {
     return next;
 }
 
+void bbcpu_call_native(BbCpu *cpu, const void *fn) {
+    __atomic_add_fetch(&bbcpu_native_calls, 1, __ATOMIC_RELAXED);
+    call_host(cpu, (uint64_t)(uintptr_t)fn, cpu->r[RSP]); /* a call: no return address pushed */
+}
+
 void bbcpu_call_host_at_rip(BbCpu *cpu) {
     call_host(cpu, cpu->rip, cpu->r[RSP] + 8);
     cpu->rip = pop(cpu);
