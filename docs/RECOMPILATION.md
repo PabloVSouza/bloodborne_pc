@@ -186,7 +186,9 @@ job loop (`0x21b8710`) matches on 31 of 50; 18 of the others had other threads' 
 
 ## What the image contains
 
-162,959 functions with unwind information (median 80 bytes), about 10 million instructions. No
+162,959 functions with unwind information (median 80 bytes), about 10 million instructions;
+241,821 functions in all with those found through calls, jumps and code pointers (about 11.3
+million instructions). No
 C++ RTTI. About 500 source paths in assertion and log messages name the libraries:
 
 | Library | Functions | Code | Known by |
