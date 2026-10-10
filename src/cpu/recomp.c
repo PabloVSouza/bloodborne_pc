@@ -3,6 +3,8 @@
  * replace the translated ones. A call of one reaches the dispatcher (the JIT leaves its first
  * instruction untranslated) and bbcpu_step runs it. BB_RECOMP_OFF=OFFSET,... leaves chosen ones to
  * the translator (to find a wrong one by bisection). */
+#include <setjmp.h>
+#include <string.h>
 #include "trace.h"
 #include "../recomp/rc.h"
 #include <dlfcn.h>
@@ -88,8 +90,36 @@ int bbcpu_recomp_thread_ok(void) {
 
 /* ---- the runtime the generated code calls (RcApi) ---- */
 
-/* The return address of calls run in the translator (never guest code): bbcpu_run stops there. */
-#define SENTINEL UINT64_C(0x0000700000000e00)
+/* Calls the runtime makes in the translator get a return address of their own, never guest code
+ * (FRAME_BASE + 16 * depth): bbcpu_run stops there. A longjmp (or an exception) in the guest can
+ * leave several such frames at once: the guest then returns to an outer frame's address, and
+ * return_hook goes back to that frame on the host too (the C frames between are left: recompiled
+ * code holds nothing). One address for all of them returned into the innermost frame instead. */
+#define FRAME_BASE UINT64_C(0x0000700100000000)
+typedef struct { jmp_buf jump; } Frame; /* _setjmp: no signal mask */
+static _Thread_local Frame *frames;
+static _Thread_local uint32_t frame_depth, frame_capacity;
+
+static void return_hook(BbCpu *cpu) {
+    const uint64_t rip = cpu->rip;
+    if (rip < FRAME_BASE || rip >= FRAME_BASE + (uint64_t)frame_depth * 16 || (rip & 15)) return;
+    _longjmp(frames[(rip - FRAME_BASE) / 16].jump, 1);
+}
+
+/* The translator from cpu->rip until the guest returns through `slot` (the return address the
+ * caller left there, replaced by this frame's). */
+static void run_translated(BbCpu *cpu, uint64_t slot) {
+    if (frame_depth == frame_capacity) {
+        frame_capacity = frame_capacity ? frame_capacity * 2 : 64;
+        frames = realloc(frames, frame_capacity * sizeof(*frames));
+        if (!frames) abort();
+    }
+    const volatile uint32_t depth = frame_depth++;
+    const uint64_t stop = FRAME_BASE + (uint64_t)depth * 16;
+    bb_store(slot, 8, stop);
+    if (_setjmp(frames[depth].jump) == 0) bbcpu_run(cpu, stop);
+    frame_depth = depth;
+}
 
 static uint64_t rc_step(BbCpu *cpu) {
     const BbBlock *block = bbcpu_block(cpu->rip);
@@ -117,10 +147,9 @@ static void rc_call(BbCpu *cpu, uint64_t target, uint64_t next) {
         fn(cpu);
         return;
     }
-    /* The translator (and natives, imports: bbcpu_run calls them), returning to SENTINEL. */
-    bb_store(cpu->r[RSP], 8, SENTINEL);
+    /* The translator (and natives, imports: bbcpu_run calls them). */
     cpu->rip = target;
-    bbcpu_run(cpu, SENTINEL);
+    run_translated(cpu, cpu->r[RSP]);
     cpu->rip = next;
 }
 
@@ -132,15 +161,13 @@ static void rc_tail(BbCpu *cpu) {
         return;
     }
     const uint64_t back = bb_load(cpu->r[RSP], 8);
-    bb_store(cpu->r[RSP], 8, SENTINEL);
-    bbcpu_run(cpu, SENTINEL);
+    run_translated(cpu, cpu->r[RSP]);
     cpu->rip = back;
 }
 
 static void rc_bail(BbCpu *cpu, uint64_t entry_rsp) {
     const uint64_t back = bb_load(entry_rsp, 8);
-    bb_store(entry_rsp, 8, SENTINEL);
-    bbcpu_run(cpu, SENTINEL);
+    run_translated(cpu, entry_rsp);
     cpu->rip = back;
 }
 
@@ -156,15 +183,46 @@ static void *report(void *unused) {
     return NULL;
 }
 
-static int switched_off(const char *list, uint64_t offset) {
-    for (const char *p = list; p && *p;) {
-        char *end;
-        const uint64_t value = strtoull(p, &end, 0);
-        if (end == p) break;
-        if (value == offset) return 1;
-        p = *end == ',' ? end + 1 : end;
+/* A set of image offsets from an environment variable: "OFFSET,OFFSET..." or "@FILE" (offsets
+ * separated by commas, spaces or lines). */
+typedef struct { uint64_t *v; size_t n; int given; } OffsetSet;
+static int by_value(const void *a, const void *b) {
+    const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
+}
+static OffsetSet offset_set(const char *name) {
+    OffsetSet set = {0};
+    const char *value = getenv(name);
+    if (!value || !*value) return set;
+    set.given = 1;
+    char *text = NULL;
+    if (value[0] == '@') {
+        FILE *f = fopen(value + 1, "r");
+        if (!f) { fprintf(stderr, "Recompiled: %s: cannot read %s\n", name, value + 1); return set; }
+        fseek(f, 0, SEEK_END);
+        const long size = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        text = calloc((size_t)size + 1, 1);
+        if (text && fread(text, 1, (size_t)size, f) != (size_t)size) text[0] = 0;
+        fclose(f);
+    } else {
+        text = strdup(value);
     }
-    return 0;
+    size_t capacity = 0;
+    for (char *p = text; p && *p;) {
+        char *end;
+        const uint64_t v = strtoull(p, &end, 0);
+        if (end == p) { ++p; continue; }
+        if (set.n == capacity) { capacity = capacity ? capacity * 2 : 256; set.v = realloc(set.v, capacity * sizeof(*set.v)); }
+        set.v[set.n++] = v;
+        p = end;
+    }
+    free(text);
+    if (set.n) qsort(set.v, set.n, sizeof(*set.v), by_value);
+    return set;
+}
+static int in_set(const OffsetSet *set, uint64_t offset) {
+    return set->n && bsearch(&offset, set->v, set->n, sizeof(*set->v), by_value) != NULL;
 }
 
 void bbcpu_recomp_load(uint64_t image_base) {
@@ -176,15 +234,17 @@ void bbcpu_recomp_load(uint64_t image_base) {
         fprintf(stderr, "Recompiled: %s: %s\n", path, dlerror());
         return;
     }
+    bbcpu_return_hook = return_hook;
     static RcApi api;
     api = (RcApi){.version = BB_RECOMP_API_VERSION, .image_base = image_base, .step = rc_step,
                   .call = rc_call, .tail = rc_tail, .bail = rc_bail};
     size_t count = 0;
     const RcFunction *functions = init(&api, &count);
-    const char *off = getenv("BB_RECOMP_OFF");
+    /* BB_RECOMP_OFF: these not; BB_RECOMP_ONLY: only these (bisecting). */
+    const OffsetSet off = offset_set("BB_RECOMP_OFF"), only = offset_set("BB_RECOMP_ONLY");
     size_t used = 0, changed = 0;
     for (size_t i = 0; i < count; ++i) {
-        if (switched_off(off, functions[i].offset)) continue;
+        if (in_set(&off, functions[i].offset) || (only.given && !in_set(&only, functions[i].offset))) continue;
         if (bbcpu_recomp_hash(image_base + functions[i].offset, functions[i].size) != functions[i].hash) {
             ++changed; /* patched since (game patches, hooks): the translator runs it */
             continue;

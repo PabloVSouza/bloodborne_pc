@@ -939,6 +939,8 @@ void bbcpu_call_host_at_rip(BbCpu *cpu) {
     cpu->rip = pop(cpu);
 }
 
+void (*bbcpu_return_hook)(BbCpu *cpu);
+
 void bbcpu_run(BbCpu *cpu, uint64_t stop) {
     static int initialized;
     if (!__atomic_load_n(&initialized, __ATOMIC_ACQUIRE)) {
@@ -948,6 +950,7 @@ void bbcpu_run(BbCpu *cpu, uint64_t stop) {
     if (bbcpu_jit_run(cpu, stop)) return;
     while (cpu->rip != stop) {
         if (!bbcpu_is_guest_code(cpu->rip)) {
+            if (bbcpu_return_hook) bbcpu_return_hook(cpu);
             /* Reached a host function through a return or a computed branch (a host function
              * pointer the guest stored): its return address is on the guest stack. */
             const uint64_t target = cpu->rip;

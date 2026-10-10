@@ -2349,6 +2349,7 @@ int bbcpu_jit_run(BbCpu *cpu, uint64_t stop) {
         if (!bbcpu_is_guest_code(cpu->rip)) {
             cpu->jit_link = 0;
             jit_to_x86(cpu);
+            if (bbcpu_return_hook) bbcpu_return_hook(cpu);
             bbcpu_call_host_at_rip(cpu);
             x86_to_jit(cpu);
             continue;

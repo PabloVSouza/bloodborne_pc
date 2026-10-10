@@ -1205,6 +1205,43 @@ int main(int argc, char **argv) {
         if (!size) { fprintf(stderr, "%#" PRIx64 ": not in %s\n", offset, argv[2]); return 1; }
         functions[function_count++] = (Function){offset, size};
     }
+    /* Functions that call setjmp stay with the translator: the setjmp's return address would be
+     * the runtime's (rc->call), and a longjmp cannot come back into a C function that went on.
+     * From calls.tsv and imports.tsv next to FUNCTIONS_TSV (tools/recomp/scan.c, imports.py). */
+    {
+        char dir[1024];
+        snprintf(dir, sizeof(dir), "%s", argv[2]);
+        char *slash = strrchr(dir, '/');
+        if (slash) slash[1] = 0; else dir[0] = 0;
+        char path[1100], line[512];
+        snprintf(path, sizeof(path), "%simports.tsv", dir);
+        uint64_t jumps[8];
+        int jump_count = 0;
+        FILE *f = fopen(path, "r");
+        while (f && fgets(line, sizeof(line), f)) {
+            char name[256];
+            unsigned long long stub;
+            if (sscanf(line, "%llx\t%255s", &stub, name) == 2 &&
+                (!strcmp(name, "setjmp") || !strcmp(name, "_setjmp") || !strcmp(name, "sigsetjmp")) && jump_count < 8)
+                jumps[jump_count++] = stub;
+        }
+        if (f) fclose(f);
+        else fprintf(stderr, "%s: none (functions that call setjmp are not known)\n", path);
+        snprintf(path, sizeof(path), "%scalls.tsv", dir);
+        f = jump_count ? fopen(path, "r") : NULL;
+        size_t skipped = 0;
+        while (f && fgets(line, sizeof(line), f)) {
+            unsigned long long caller, callee;
+            if (sscanf(line, "%llx\t%llx", &caller, &callee) != 2) continue;
+            for (int j = 0; j < jump_count; ++j) {
+                if (callee != jumps[j]) continue;
+                for (size_t i = 0; i < function_count; ++i)
+                    if (functions[i].offset == caller) { functions[i] = functions[--function_count]; ++skipped; break; }
+            }
+        }
+        if (f) fclose(f);
+        if (skipped) printf("%zu functions call setjmp: left to the translator\n", skipped);
+    }
     /* By offset, once each. */
     qsort(functions, function_count, sizeof(*functions), by_offset); /* offset first in Function */
     size_t unique = 0;

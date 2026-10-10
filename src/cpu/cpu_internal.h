@@ -112,6 +112,10 @@ int bbcpu_is_guest_code(uint64_t address);
 
 /* Interpreter: runs from cpu->rip until rip == stop (the sentinel return address). */
 void bbcpu_run(BbCpu *cpu, uint64_t stop);
+/* Called by bbcpu_run when the guest reaches host code other than `stop` (recomp.c: the return
+ * address of an outer frame of the runtime, after a longjmp or an exception; it does not return
+ * then). NULL: none. */
+extern void (*bbcpu_return_hook)(BbCpu *cpu);
 /* Executes one instruction at cpu->rip; returns the next rip (interp.c). */
 uint64_t bbcpu_step(BbCpu *cpu, const BbInsn *in);
 /* A host function reached at cpu->rip with its return address on the guest stack (interp.c). */
