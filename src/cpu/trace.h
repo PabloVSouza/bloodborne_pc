@@ -25,9 +25,12 @@ struct BbTrace {
     void (*call)(BbTrace *t, const BbInsn *in, uint64_t target, int how);
     /* An instruction whose accesses the tracer cannot list (the record is not usable). */
     void (*unsupported)(BbTrace *t, const BbInsn *in);
+    /* Optional: before each instruction of the function (replay --lockstep). */
+    void (*before)(BbTrace *t, uint64_t rip);
 };
 
-/* Runs the function at cpu->rip (its return address on top of the stack) until it returns. */
+/* Runs the function at cpu->rip (its return address on top of the stack) until it returns; with
+ * t->entry_rsp set, from the middle of it (its return address at entry_rsp). */
 void bbcpu_trace(BbTrace *t);
 void bbcpu_trace_regs(const BbCpu *cpu, BbRecRegs *regs);
 void bbcpu_trace_set_regs(BbCpu *cpu, const BbRecRegs *regs);
@@ -53,6 +56,8 @@ typedef void (*RcFn)(BbCpu *cpu);
 extern int bbcpu_recomp_count;
 extern uint64_t bbcpu_recomp_calls;
 RcFn bbcpu_recomp_at(uint64_t address);
+/* Whether this thread runs recompiled functions (BB_RECOMP_THREADS, diagnostics). */
+int bbcpu_recomp_thread_ok(void);
 /* The hash of the code at [start, start + size) the recompiler goes by (recomp.c): instruction
  * bytes, the loader's TCB loads (mov reg, fs:[0], rewritten as gs loads) as one token. */
 uint64_t bbcpu_recomp_hash(uint64_t start, uint64_t size);

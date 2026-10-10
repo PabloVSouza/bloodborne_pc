@@ -235,6 +235,22 @@ static uint64_t map_pages(const Record *r) {
     return 0;
 }
 
+/* The bytes the function wrote, in their final state: its last write, or what a callee left there
+ * after it (observed later). Bytes for which `skip` says so are left out. */
+static void expected_writes(const Record *r, ByteMap *expected, uint64_t skip_lo, uint64_t skip_hi) {
+    for (uint64_t offset = 0; event_at(r, offset); offset = event_next(r, offset)) {
+        const BbRecEvent *e = event_at(r, offset);
+        if (e->kind != BBREC_WRITE && e->kind != BBREC_OBSERVE) continue;
+        for (uint32_t b = 0; b < e->length; ++b) {
+            const uint64_t address = e->address + b;
+            if (address >= skip_lo && address < skip_hi) continue;
+            uint8_t old;
+            if (e->kind == BBREC_WRITE || map_get(expected, address, &old))
+                map_put(expected, address, ((const uint8_t *)event_data(e))[b]);
+        }
+    }
+}
+
 /* ---- native versions (--native LIB) ---- */
 
 static const BbNativeFunction *native_function;
@@ -302,6 +318,9 @@ static void native_epoch(NativeReplay *n, uint64_t offset) {
             *(uint8_t *)address = data[b];
             uint8_t *base = baseline_of(n, address);
             if (base) *base = data[b];
+            /* A byte the function wrote that a callee changed: its state now. */
+            uint8_t old;
+            if (map_get(&n->written, address, &old)) map_put(&n->written, address, data[b]);
         }
     }
 }
@@ -410,15 +429,7 @@ static int replay_native(const Record *r) {
     }
     /* The bytes the original wrote (outside its frame) against the native function's. */
     ByteMap expected = {0};
-    for (uint64_t offset = 0; event_at(r, offset); offset = event_next(r, offset)) {
-        e = event_at(r, offset);
-        if (e->kind != BBREC_WRITE) continue;
-        for (uint32_t b = 0; b < e->length; ++b) {
-            const uint64_t address = e->address + b;
-            if (address >= n.frame_lo && address < n.frame_hi + 8) continue;
-            map_put(&expected, address, ((const uint8_t *)event_data(e))[b]);
-        }
-    }
+    expected_writes(r, &expected, n.frame_lo, n.frame_hi + 8);
     uint64_t wrong = 0, extra = 0;
     for (size_t i = 0; i < expected.capacity; ++i) {
         if (!expected.keys[i]) continue;
@@ -442,6 +453,65 @@ static int replay_native(const Record *r) {
 /* ---- recompiled code (--recomp LIB) ---- */
 
 static RcFn recomp_function;
+
+/* --lockstep: the original's and the generated code's paths (offset and registers before each
+ * instruction), compared; the first difference is reported. */
+typedef struct { uint64_t off; uint64_t r[16]; uint8_t v[16][32]; } Step;
+enum { MAX_STEPS = 200000 };
+static int lockstep;
+static Step *original_steps; /* shared with the child that runs the original */
+static uint64_t *original_count;
+static Step *generated_steps;
+static uint64_t generated_count, lockstep_base;
+
+static void original_before(BbTrace *t, uint64_t rip) {
+    if (*original_count < MAX_STEPS) {
+        Step *s = &original_steps[(*original_count)++];
+        s->off = rip - lockstep_base;
+        memcpy(s->r, t->cpu->r, sizeof(s->r));
+        for (int i = 0; i < 16; ++i) memcpy(s->v[i], t->cpu->v[i].b, 32);
+    }
+}
+static void generated_trace(uint64_t offset, const uint64_t r[16], const BbCpu *cpu) {
+    if (generated_count < MAX_STEPS) {
+        Step *s = &generated_steps[generated_count++];
+        s->off = offset;
+        memcpy(s->r, r, sizeof(s->r));
+        for (int i = 0; i < 16; ++i) memcpy(s->v[i], cpu->v[i].b, 32);
+    }
+}
+
+/* The first step where the two paths differ. */
+static void compare_steps(void) {
+    const uint64_t n = generated_count < *original_count ? generated_count : *original_count;
+    for (uint64_t i = 0; i < n; ++i) {
+        const Step *a = &original_steps[i], *b = &generated_steps[i];
+        if (a->off != b->off) {
+            printf("    lockstep: step %" PRIu64 ": the original is at %#" PRIx64 ", the generated code at %#" PRIx64
+                   " (previous instruction %#" PRIx64 ")\n", i, a->off, b->off, i ? a[-1].off : 0);
+            return;
+        }
+        for (int k = 0; k < 16; ++k)
+            if (a->r[k] != b->r[k]) {
+                printf("    lockstep: step %" PRIu64 " at %#" PRIx64 ": %s %#" PRIx64 ", generated %#" PRIx64
+                       " (written by the instruction at %#" PRIx64 ")\n", i, a->off, reg_names[k], a->r[k], b->r[k],
+                       i ? a[-1].off : 0);
+                return;
+            }
+        for (int k = 0; k < 16; ++k)
+            if (memcmp(a->v[k], b->v[k], 32)) {
+                uint64_t x[4], y[4];
+                memcpy(x, a->v[k], 32);
+                memcpy(y, b->v[k], 32);
+                printf("    lockstep: step %" PRIu64 " at %#" PRIx64 ": ymm%d %016" PRIx64 "%016" PRIx64 "%016" PRIx64 "%016" PRIx64
+                       ", generated %016" PRIx64 "%016" PRIx64 "%016" PRIx64 "%016" PRIx64 " (written by the instruction at %#" PRIx64 ")\n",
+                       i, a->off, k, x[3], x[2], x[1], x[0], y[3], y[2], y[1], y[0], i ? a[-1].off : 0);
+                return;
+            }
+    }
+    printf("    lockstep: the same %" PRIu64 " steps (original %" PRIu64 ", generated %" PRIu64 ")\n", n,
+           *original_count, generated_count);
+}
 
 /* RcApi.call/tail: answered from the record, as replay_call does for the tracer. */
 static void recomp_call_how(BbCpu *cpu, uint64_t target, uint64_t next, int tail) {
@@ -478,10 +548,30 @@ static void recomp_call_how(BbCpu *cpu, uint64_t target, uint64_t next, int tail
 }
 static void recomp_call(BbCpu *cpu, uint64_t target, uint64_t next) { recomp_call_how(cpu, target, next, 0); }
 static void recomp_tail(BbCpu *cpu) { recomp_call_how(cpu, cpu->rip, 0, 1); }
+/* RcApi.bail: the rest of the function in the tracer, its calls answered from the record as the
+ * generated code's are (what it writes is found by comparing memory, as for the generated code). */
+static uint64_t function_end;
+static void bail_access(BbTrace *t, int kind, uint64_t address, uint32_t length) {
+    (void)t; (void)kind; (void)address; (void)length;
+}
+static void bail_call(BbTrace *t, const BbInsn *in, uint64_t target, int how) {
+    (void)in;
+    if (how == BB_TRACE_TRAP) {
+        native_fail(active, "an int3 hook at %#" PRIx64 " (not replayable)", t->cpu->rip);
+        t->cpu->rip = 0;
+        return;
+    }
+    recomp_call_how(t->cpu, target, t->cpu->rip, how == BB_TRACE_TAIL);
+}
+static void bail_unsupported(BbTrace *t, const BbInsn *in) {
+    (void)t; (void)in;
+}
 static void recomp_bail(BbCpu *cpu, uint64_t entry_rsp) {
-    (void)entry_rsp;
-    native_fail(active, "went back to the translator at %#" PRIx64 " (not replayable yet)", cpu->rip);
-    cpu->rip = 0;
+    BbTrace t = {.cpu = cpu, .start = active->record->entry.rip, .end = function_end, .entry_rsp = entry_rsp,
+                 .access = bail_access, .call = bail_call, .unsupported = bail_unsupported,
+                 .limit = active->record->header.instructions * 4 + 10000};
+    bbcpu_trace(&t);
+    if (t.stopped) native_fail(active, "still running in the translator after %" PRIu64 " instructions", t.instructions);
 }
 static uint64_t recomp_step(BbCpu *cpu) {
     const BbBlock *block = bbcpu_block(cpu->rip);
@@ -490,6 +580,13 @@ static uint64_t recomp_step(BbCpu *cpu) {
 
 static int replay_recomp(const Record *r) {
     NativeReplay n = {.record = r, .frame_lo = 1, .frame_hi = 0, .same_frame = 1};
+    /* The function's end for the tracer (bail): before the first tail-call target above it. */
+    function_end = UINT64_MAX;
+    for (uint64_t offset = 0; event_at(r, offset); offset = event_next(r, offset)) {
+        const BbRecEvent *e = event_at(r, offset);
+        if (e->kind == BBREC_CALL && e->tail && e->address > r->entry.rip && e->address < function_end)
+            function_end = e->address;
+    }
     active = &n;
     n.pages = tracked_count + (size_t)((image_data_hi - image_data_lo) / 16384);
     n.baseline = calloc(n.pages, sizeof(*n.baseline));
@@ -520,11 +617,7 @@ static int replay_recomp(const Record *r) {
             native_fail(&n, "at the return: xmm0 or xmm1 differs");
     }
     ByteMap expected = {0};
-    for (uint64_t offset = 0; event_at(r, offset); offset = event_next(r, offset)) {
-        e = event_at(r, offset);
-        if (e->kind != BBREC_WRITE) continue;
-        for (uint32_t b = 0; b < e->length; ++b) map_put(&expected, e->address + b, ((const uint8_t *)event_data(e))[b]);
-    }
+    expected_writes(r, &expected, 1, 0);
     uint64_t wrong = 0, extra = 0;
     for (size_t i = 0; i < expected.capacity; ++i) {
         if (!expected.keys[i]) continue;
@@ -553,6 +646,23 @@ static void on_timeout(int signal) {
 }
 
 static int replay(const Record *r) {
+    /* --lockstep: the original first, in a child of its own (its path into shared memory). */
+    if (recomp_function && lockstep && !original_steps) {
+        original_steps = mmap(NULL, MAX_STEPS * sizeof(Step) + 8, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+        original_count = (uint64_t *)(original_steps + MAX_STEPS);
+        generated_steps = malloc(MAX_STEPS * sizeof(Step));
+        lockstep_base = r->header.image_base;
+        const pid_t child = fork();
+        if (child == 0) {
+            const RcFn saved = recomp_function;
+            recomp_function = NULL;
+            (void)saved;
+            freopen("/dev/null", "w", stdout);
+            _exit(replay(r));
+        }
+        int status;
+        waitpid(child, &status, 0);
+    }
     struct sigaction action = {.sa_sigaction = on_crash, .sa_flags = SA_SIGINFO};
     sigaction(SIGSEGV, &action, NULL);
     sigaction(SIGBUS, &action, NULL);
@@ -572,6 +682,11 @@ static int replay(const Record *r) {
         memcpy((void *)r->entry.fs_base, &r->entry.tcb, 8);
     }
     if (native_function) return replay_native(r);
+    if (recomp_function && lockstep) {
+        const int result = replay_recomp(r);
+        compare_steps();
+        return result;
+    }
     if (recomp_function) return replay_recomp(r);
     Replay p = {.record = r};
     static BbCpu cpu;
@@ -595,6 +710,7 @@ static int replay(const Record *r) {
         if (e->kind == BBREC_CALL && e->tail && e->address > r->entry.rip && e->address < p.trace.end)
             p.trace.end = e->address;
     }
+    if (lockstep) p.trace.before = original_before;
     p.trace.limit = r->header.instructions * 4 + 10000;
     bbcpu_trace(&p.trace);
     if (p.trace.stopped) fail(&p, "still running after %" PRIu64 " instructions (recorded %" PRIu64 ")",
@@ -693,6 +809,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--nofork")) no_fork = 1; /* one record (--only), in a debugger */
         else if (!strcmp(argv[i], "--native") && i + 1 < argc) native_library = argv[++i];
         else if (!strcmp(argv[i], "--recomp") && i + 1 < argc) recomp_library = argv[++i];
+        else if (!strcmp(argv[i], "--lockstep")) lockstep = 1; /* with --recomp and a BB_RECOMP_TRACE=1 library */
         else records = argv[i];
     }
     if (!records) {
@@ -732,7 +849,8 @@ int main(int argc, char **argv) {
                 /* The recompiled version of the recorded function, its calls answered here. */
                 static RcApi api;
                 api = (RcApi){.version = BB_RECOMP_API_VERSION, .image_base = r.header.image_base,
-                              .step = recomp_step, .call = recomp_call, .tail = recomp_tail, .bail = recomp_bail};
+                              .step = recomp_step, .call = recomp_call, .tail = recomp_tail, .bail = recomp_bail,
+                              .trace = generated_trace};
                 void *library = dlopen(recomp_library, RTLD_NOW | RTLD_LOCAL);
                 const RcInit init = library ? (RcInit)dlsym(library, BB_RECOMP_INIT) : NULL;
                 if (!init) {

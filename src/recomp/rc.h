@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-#define BB_RECOMP_API_VERSION 2u
+#define BB_RECOMP_API_VERSION 3u
 #define BB_RECOMP_INIT "bb_recomp_init"
 
 typedef struct {
@@ -29,6 +29,9 @@ typedef struct {
     /* The rest of the function from cpu->rip in the translator (its return address at entry_rsp);
      * cpu->rip is where it returned to after. */
     void (*bail)(BbCpu *cpu, uint64_t entry_rsp);
+    /* Code generated with BB_RECOMP_TRACE=1 calls this before each instruction (its image
+     * offset, the guest registers): tools/recomp/replay.c --lockstep. NULL elsewhere. */
+    void (*trace)(uint64_t offset, const uint64_t r[16], const BbCpu *cpu);
 } RcApi;
 
 #ifndef BB_CPU_TRACE_H
@@ -89,18 +92,13 @@ static inline int rc_cond(int cc, int kind, uint64_t a, uint64_t b, uint64_t r, 
     return (cc & 1) ? !v : v;
 }
 
-/* Guest memory: x86 ordering between threads (bb_load/bb_store: acquire/release); the stack is
- * the thread's own (plain accesses). */
+/* Guest memory: x86 ordering between threads (bb_load/bb_store: acquire/release). The stack too:
+ * other threads read and write structures on it (the game's jobs report into their creator's
+ * stack), so plain accesses there let the compiler reorder or merge what another thread sees. */
 static inline uint64_t rc_ld(uint64_t address, int size) { return bb_load(address, size); }
 static inline void rc_st(uint64_t address, int size, uint64_t value) { bb_store(address, size, value); }
-static inline uint64_t rc_lds(uint64_t address, int size) {
-    uint64_t v = 0;
-    memcpy(&v, (const void *)address, (size_t)size);
-    return v;
-}
-static inline void rc_sts(uint64_t address, int size, uint64_t value) {
-    memcpy((void *)address, &value, (size_t)size);
-}
+static inline uint64_t rc_lds(uint64_t address, int size) { return bb_load(address, size); }
+static inline void rc_sts(uint64_t address, int size, uint64_t value) { bb_store(address, size, value); }
 
 /* SZP of a result into flags f (the interpreter's set_szp). */
 static inline uint64_t rc_szp(uint64_t f, uint64_t r, int size) {

@@ -61,6 +61,31 @@ uint64_t bbcpu_recomp_hash(uint64_t start, uint64_t size) {
     return h;
 }
 
+/* BB_RECOMP_THREADS / BB_RECOMP_NOT_THREADS=NAME,... (diagnostics): recompiled functions only on
+ * the threads whose name contains one of the first, and none of the second (host thread names). */
+static int name_matches(const char *list, const char *name) {
+    if (!list) return 0;
+    char copy[512];
+    snprintf(copy, sizeof(copy), "%s", list);
+    for (char *part = strtok(copy, ","); part; part = strtok(NULL, ","))
+        if (*part && strstr(name, part)) return 1;
+    return 0;
+}
+int bbcpu_recomp_thread_ok(void) {
+    static _Thread_local int ok = -1;
+    if (ok < 0) {
+        const char *only = getenv("BB_RECOMP_THREADS"), *not = getenv("BB_RECOMP_NOT_THREADS");
+        if (!only && !not) {
+            ok = 1;
+        } else {
+            char name[64] = "";
+            pthread_getname_np(pthread_self(), name, sizeof(name));
+            ok = (!only || name_matches(only, name)) && !name_matches(not, name);
+        }
+    }
+    return ok;
+}
+
 /* ---- the runtime the generated code calls (RcApi) ---- */
 
 /* The return address of calls run in the translator (never guest code): bbcpu_run stops there. */
@@ -71,8 +96,19 @@ static uint64_t rc_step(BbCpu *cpu) {
     return bbcpu_step_insn(cpu, &block->insn[0]);
 }
 
+/* BB_RECOMP_NODIRECT=1 (diagnostics): calls and tail calls between recompiled functions go
+ * through the translator's dispatcher instead of being made directly. */
+static int no_direct(void) {
+    static int value = -1;
+    if (value < 0) {
+        const char *env = getenv("BB_RECOMP_NODIRECT");
+        value = env && env[0] == '1';
+    }
+    return value;
+}
+
 static void rc_call(BbCpu *cpu, uint64_t target, uint64_t next) {
-    const RcFn fn = bbcpu_recomp_at(target);
+    const RcFn fn = no_direct() || !bbcpu_recomp_thread_ok() ? NULL : bbcpu_recomp_at(target);
     cpu->r[RSP] -= 8;
     if (fn) {
         __atomic_add_fetch(&bbcpu_recomp_calls, 1, __ATOMIC_RELAXED);
@@ -89,7 +125,7 @@ static void rc_call(BbCpu *cpu, uint64_t target, uint64_t next) {
 }
 
 static void rc_tail(BbCpu *cpu) {
-    const RcFn fn = bbcpu_recomp_at(cpu->rip);
+    const RcFn fn = no_direct() || !bbcpu_recomp_thread_ok() ? NULL : bbcpu_recomp_at(cpu->rip);
     if (fn) {
         __atomic_add_fetch(&bbcpu_recomp_calls, 1, __ATOMIC_RELAXED);
         fn(cpu);

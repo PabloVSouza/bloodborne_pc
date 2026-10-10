@@ -118,8 +118,15 @@ static void jit_native(BbCpu *cpu, const void *fn) {
  * address is pushed; it returns with cpu->rip at it. */
 static void jit_recomp(BbCpu *cpu, RcFn fn) {
     jit_to_x86(cpu);
-    __atomic_add_fetch(&bbcpu_recomp_calls, 1, __ATOMIC_RELAXED);
-    fn(cpu);
+    if (bbcpu_recomp_thread_ok()) {
+        __atomic_add_fetch(&bbcpu_recomp_calls, 1, __ATOMIC_RELAXED);
+        fn(cpu);
+    } else { /* not on this thread (BB_RECOMP_THREADS): translated, returning to a sentinel */
+        const uint64_t next = bb_load(cpu->r[RSP], 8);
+        bb_store(cpu->r[RSP], 8, UINT64_C(0x0000700000000d00));
+        bbcpu_run(cpu, UINT64_C(0x0000700000000d00));
+        cpu->rip = next;
+    }
     x86_to_jit(cpu);
 }
 

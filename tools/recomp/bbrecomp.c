@@ -206,10 +206,13 @@ static int cc_of(int m) {
 
 typedef struct { uint64_t start, end; } Range;
 
-/* A jump to image offset `t`: a goto inside the function, else a tail call. */
+/* A jump to image offset `t`: a goto inside the function. Out of it: a tail call when the stack is
+ * back at the entry (the return address on top), else code of this function elsewhere (a part the
+ * compiler moved out, a shared block): the translator runs the rest, the function's return address
+ * at entry_rsp (rc->bail). */
 static void jump(Range f, uint64_t t) {
     if (t >= f.start && t < f.end) emit("goto L_%" PRIx64 ";", t);
-    else emit("{ " SPILL " c->rip = B + 0x%" PRIx64 "ull; rc->tail(c); return; }", t);
+    else emit("{ " SPILL " " FLAGS_OUT " c->rip = B + 0x%" PRIx64 "ull; if (r[RSP] == entry_rsp) rc->tail(c); else rc->bail(c, entry_rsp); return; }", t);
 }
 
 static int translate_vector(uint64_t off, const BbInsn *in);
@@ -719,6 +722,8 @@ static Insn *decode(Function fn, size_t *count) {
 
 /* Snippet mode (fuzzing, tests/fuzz_recomp.c): one instruction, then a return at its end. */
 static int snippet_mode;
+/* BB_RECOMP_TRACE=1: a trace point before each instruction (replay --lockstep). */
+static int trace_points;
 static uint64_t snippet_line;
 
 static int by_offset(const void *a, const void *b) {
@@ -755,6 +760,7 @@ static void generate(Function fn, uint64_t *stats) {
     for (size_t i = 0; i < count; ++i) {
         const Insn *x = &list[i];
         if (bsearch(&x->off, targets, target_count, sizeof(*targets), by_offset)) emit("L_%" PRIx64 ": ", x->off);
+        if (trace_points) emit("rc->trace(0x%" PRIx64 ", r, c); ", x->off);
         ++stats[2];
         if (translate(f, x->off, &x->in, stats)) {
             ++stats[0];
@@ -772,8 +778,8 @@ static void generate(Function fn, uint64_t *stats) {
         if (!i || targets[i] != targets[i - 1]) emit("    case 0x%" PRIx64 ": goto L_%" PRIx64 ";\n", targets[i], targets[i]);
     emit("    default: break;\n    }\n");
     emit("    " SPILL " " FLAGS_OUT "\n    c->rip = dn;\n");
-    emit("    if (dn - B >= 0x%" PRIx64 "ull && dn - B < 0x%" PRIx64 "ull) rc->bail(c, entry_rsp); /* into the function: the translator */\n", f.start, f.end);
-    emit("    else rc->tail(c); /* out of it: a tail call */\n}\n");
+    emit("    if ((dn - B >= 0x%" PRIx64 "ull && dn - B < 0x%" PRIx64 "ull) || r[RSP] != entry_rsp) rc->bail(c, entry_rsp); /* the translator */\n", f.start, f.end);
+    emit("    else rc->tail(c); /* out of the function, the stack as at its entry: a tail call */\n}\n");
     free(targets);
     free(list);
 }
@@ -842,6 +848,7 @@ int main(int argc, char **argv) {
     map_image(argv[1]);
     static BbCpu warm;
     bbcpu_run(&warm, 0); /* the interpreter's tables */
+    trace_points = getenv("BB_RECOMP_TRACE") && getenv("BB_RECOMP_TRACE")[0] == '1';
     functions = calloc((size_t)argc, sizeof(*functions));
     for (int i = 4; i < argc; ++i) {
         const uint64_t offset = strtoull(argv[i], NULL, 0);

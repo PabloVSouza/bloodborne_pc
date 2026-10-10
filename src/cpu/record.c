@@ -119,13 +119,14 @@ static void string_accesses(BbTrace *t, const BbInsn *in, uint64_t rcx, uint64_t
 
 void bbcpu_trace(BbTrace *t) {
     BbCpu *cpu = t->cpu;
-    t->entry_rsp = cpu->r[RSP];
+    if (!t->entry_rsp) t->entry_rsp = cpu->r[RSP]; /* preset: the rest of a function, from its middle */
     for (;;) {
         const BbBlock *block = bbcpu_block(cpu->rip);
         for (uint32_t i = 0; i < block->count; ++i) {
             const BbInsn *in = &block->insn[i];
             const uint64_t rip = cpu->rip, next = rip + in->length;
             const int m = in->mnemonic;
+            if (t->before) t->before(t, rip);
             Access acc[8];
             const int n = accesses(cpu, in, acc);
             if (n < 0) t->unsupported(t, in);
@@ -137,7 +138,11 @@ void bbcpu_trace(BbTrace *t) {
             if (m == M(CALL) || m == M(JMP)) {
                 const BbOp *op = &in->op[0];
                 const uint64_t target = op->type == OP_IMM ? rip + (uint64_t)op->disp : bbcpu_read(cpu, in, op);
-                const int leaves = target < t->start || target >= t->end || !bbcpu_is_guest_code(target);
+                /* Out of the function with the stack as at its entry: a tail call. With the frame
+                 * still in use it is code of this function elsewhere (a part the compiler moved
+                 * out): traced on. */
+                const int leaves = (target < t->start || target >= t->end || !bbcpu_is_guest_code(target)) &&
+                                   (cpu->r[RSP] == t->entry_rsp || !bbcpu_is_guest_code(target));
                 if (m == M(CALL)) {
                     cpu->rip = next;
                     t->call(t, in, target, BB_TRACE_CALL);
@@ -191,7 +196,7 @@ void bbcpu_trace_set_regs(BbCpu *cpu, const BbRecRegs *regs) {
 extern uint64_t bb_image_base __attribute__((weak));
 static uint64_t image_base(void) { return &bb_image_base ? bb_image_base : 0; }
 
-enum { MAX_TARGETS = 16, LOG_LIMIT = 64 << 20 };
+enum { MAX_TARGETS = 1 << 16, TARGET_SLOTS = 1 << 17, LOG_LIMIT = 64 << 20 };
 /* The return address of the calls the recorded function makes (never guest code). */
 #define SENTINEL UINT64_C(0x0000700000000f00)
 
@@ -199,25 +204,56 @@ typedef struct {
     uint64_t offset, size;
     uint64_t seen, recorded, racy, failed;
 } Target;
-static Target targets[MAX_TARGETS];
+static Target *targets;
 static int target_count, max_calls = 50, every = 1;
+/* Target index + 1 by image offset (open addressing). */
+static uint32_t *slots;
 static const char *directory = "out/recomp/records";
 int bbcpu_record_armed;
 static _Thread_local int in_record;
 static pthread_mutex_t file_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static uint32_t slot_of(uint64_t offset) { return (uint32_t)((offset * 0x9e3779b97f4a7c15ull) >> 47) & (TARGET_SLOTS - 1); }
+
+static void add_target(uint64_t offset, uint64_t size) {
+    if (target_count == MAX_TARGETS) return;
+    targets[target_count] = (Target){.offset = offset, .size = size};
+    uint32_t i = slot_of(offset);
+    while (slots[i]) i = (i + 1) & (TARGET_SLOTS - 1);
+    slots[i] = (uint32_t)++target_count;
+}
+
+/* BB_RECORD=OFFSET:SIZE,... or @FILE (lines "OFFSET SIZE" or "OFFSET:SIZE"). */
 __attribute__((constructor)) static void record_init(void) {
     const char *spec = getenv("BB_RECORD");
     if (!spec || !*spec) return;
-    for (const char *p = spec; *p && target_count < MAX_TARGETS;) {
-        char *end;
-        const uint64_t offset = strtoull(p, &end, 0);
-        if (end == p) break;
-        uint64_t size = 0;
-        if (*end == ':') size = strtoull(end + 1, &end, 0);
-        if (size) targets[target_count++] = (Target){.offset = offset, .size = size};
-        else fprintf(stderr, "BB_RECORD: %#llx needs its size (OFFSET:SIZE)\n", (unsigned long long)offset);
-        p = *end == ',' ? end + 1 : end;
+    targets = calloc(MAX_TARGETS, sizeof(*targets));
+    slots = calloc(TARGET_SLOTS, sizeof(*slots));
+    if (!targets || !slots) abort();
+    if (spec[0] == '@') {
+        FILE *f = fopen(spec + 1, "r");
+        if (!f) { perror(spec + 1); return; }
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            char *end;
+            const uint64_t offset = strtoull(line, &end, 0);
+            if (end == line) continue;
+            while (*end == ':' || *end == ' ' || *end == '\t') ++end;
+            const uint64_t size = strtoull(end, NULL, 0);
+            if (size) add_target(offset, size);
+        }
+        fclose(f);
+    } else {
+        for (const char *p = spec; *p;) {
+            char *end;
+            const uint64_t offset = strtoull(p, &end, 0);
+            if (end == p) break;
+            uint64_t size = 0;
+            if (*end == ':') size = strtoull(end + 1, &end, 0);
+            if (size) add_target(offset, size);
+            else fprintf(stderr, "BB_RECORD: %#llx needs its size (OFFSET:SIZE)\n", (unsigned long long)offset);
+            p = *end == ',' ? end + 1 : end;
+        }
     }
     const char *env = getenv("BB_RECORD_CALLS");
     if (env) max_calls = atoi(env);
@@ -226,12 +262,15 @@ __attribute__((constructor)) static void record_init(void) {
     env = getenv("BB_RECORD_DIR");
     if (env && *env) directory = env;
     bbcpu_record_armed = target_count > 0;
+    if (target_count > 16) printf("Record: %d functions\n", target_count);
 }
 
 static Target *find_target(uint64_t rip) {
     const uint64_t base = image_base();
-    for (int i = 0; i < target_count; ++i)
-        if (rip == base + targets[i].offset) return &targets[i];
+    if (rip < base) return NULL;
+    const uint64_t offset = rip - base;
+    for (uint32_t i = slot_of(offset); slots[i]; i = (i + 1) & (TARGET_SLOTS - 1))
+        if (targets[slots[i] - 1].offset == offset) return &targets[slots[i] - 1];
     return NULL;
 }
 
@@ -421,7 +460,7 @@ uint64_t bbcpu_record_call(BbCpu *cpu) {
     } else {
         fprintf(stderr, "Record: %s: %s\n", path, strerror(errno));
     }
-    if (recorded == (uint64_t)max_calls || recorded % 10 == 0)
+    if (target_count <= 16 && (recorded == (uint64_t)max_calls || recorded % 10 == 0))
         printf("Record: %#llx: %llu calls recorded of %llu seen (%llu with other threads' writes, "
                "%llu not usable)\n",
                (unsigned long long)target->offset, (unsigned long long)recorded,
