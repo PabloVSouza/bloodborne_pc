@@ -898,6 +898,15 @@ uint64_t bbcpu_step(BbCpu *cpu, const BbInsn *in) {
     /* BB_RECORD: a call of a recorded function runs in the recorder (record.c). */
     if (__builtin_expect(bbcpu_record_armed, 0) && bbcpu_record_wants(cpu->rip))
         return bbcpu_record_call(cpu);
+    /* A native version of the function (native.c), unless the function is being recorded. */
+    if (__builtin_expect(bbcpu_native_count, 0) && !(bbcpu_record_armed && bbcpu_record_target(cpu->rip))) {
+        const void *fn = bbcpu_native_at(cpu->rip);
+        if (fn) {
+            __atomic_add_fetch(&bbcpu_native_calls, 1, __ATOMIC_RELAXED);
+            call_host(cpu, (uint64_t)(uintptr_t)fn, cpu->r[RSP] + 8);
+            return pop(cpu);
+        }
+    }
     const int locked = in->lock || (in->mnemonic == M(XCHG) &&
                                     (in->op[0].type == OP_MEM || in->op[1].type == OP_MEM));
     if (!locked) return step(cpu, in);

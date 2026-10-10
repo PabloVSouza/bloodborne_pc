@@ -7,9 +7,14 @@
  * answered with the recorded registers and the memory observed after it. At the end the
  * registers and the bytes the function wrote must match the record.
  *
- * Replaying the original function checks the record itself; a native version (M1) is checked the
- * same way. Build: tools/decomp/replay.sh. */
+ * Replaying the original function checks the record itself. With --native LIB the library's
+ * version of the function runs instead (natively): its calls are answered the same way, and what it
+ * wrote is found by comparing memory with a copy (the original's stack frame aside: the native
+ * function has its own; a callee's writes to a buffer in the frame go to the buffer it passed).
+ * Build: tools/decomp/replay.sh. */
 #include "../../src/cpu/trace.h"
+#include "../../src/native/bbnative.h"
+#include <dlfcn.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -191,8 +196,11 @@ static void replay_unsupported(BbTrace *t, const BbInsn *in) {
     fail((Replay *)t, "an instruction the tracer cannot follow");
 }
 
-/* The game image's mapping (map_image). */
-static uint64_t image_lo, image_hi;
+/* The game image's mapping (map_image) and its writable part. */
+static uint64_t image_lo, image_hi, image_data_lo, image_data_hi;
+/* The pages map_pages mapped (native replays compare them before and after). */
+static uint64_t *tracked;
+static size_t tracked_count, tracked_capacity;
 
 /* Maps the pages the record touches; returns an address whose page this process already uses for
  * itself (the record cannot be replayed here), or 0. */
@@ -213,9 +221,218 @@ static uint64_t map_pages(const Record *r) {
                 return e->address;
             }
             map_put(&mine, page >> 14, 1);
+            if (tracked_count == tracked_capacity) {
+                tracked_capacity = tracked_capacity ? tracked_capacity * 2 : 256;
+                tracked = realloc(tracked, tracked_capacity * sizeof(*tracked));
+                if (!tracked) abort();
+            }
+            tracked[tracked_count++] = page;
         }
     }
     return 0;
+}
+
+/* ---- native versions (--native LIB) ---- */
+
+static const BbNativeFunction *native_function;
+
+/* The native replay: memory compared with a copy (the baseline) to see what the function wrote. */
+typedef struct {
+    const Record *record;
+    uint64_t cursor;
+    uint64_t frame_lo, frame_hi; /* the original's stack frame: below its entry rsp */
+    uint8_t **baseline;          /* per tracked page, then the image's data pages */
+    size_t pages;
+    ByteMap written;
+    struct { uint64_t recorded, native; } pointers[16]; /* arguments into the frame, and ours */
+    int pointer_count;
+    int failures;
+} NativeReplay;
+static NativeReplay *active;
+
+static uint64_t page_address(const NativeReplay *n, size_t i) {
+    return i < tracked_count ? tracked[i] : image_data_lo + (uint64_t)(i - tracked_count) * 16384;
+}
+
+/* What changed since the last call: the function's writes. */
+static void collect(NativeReplay *n) {
+    for (size_t i = 0; i < n->pages; ++i) {
+        uint8_t *now = (uint8_t *)page_address(n, i), *was = n->baseline[i];
+        if (!memcmp(now, was, 16384)) continue;
+        for (uint32_t b = 0; b < 16384; ++b)
+            if (now[b] != was[b]) map_put(&n->written, (uint64_t)(uintptr_t)now + b, now[b]);
+        memcpy(was, now, 16384);
+    }
+}
+
+static uint8_t *baseline_of(NativeReplay *n, uint64_t address) {
+    const uint64_t page = address & ~UINT64_C(16383);
+    if (page >= image_data_lo && page < image_data_hi)
+        return n->baseline[tracked_count + (page - image_data_lo) / 16384] + (address - page);
+    for (size_t i = 0; i < tracked_count; ++i)
+        if (tracked[i] == page) return n->baseline[i] + (address - page);
+    return NULL;
+}
+
+/* The memory of the epoch at `offset` (as apply_epoch), into memory and baseline. Memory in the
+ * original's frame goes to the native function's buffer passed for it, when there is one. */
+static void native_epoch(NativeReplay *n, uint64_t offset) {
+    const Record *r = n->record;
+    for (const BbRecEvent *e; (e = event_at(r, offset)); offset = event_next(r, offset)) {
+        if (e->kind == BBREC_CALL || e->kind == BBREC_EXIT) break;
+        if (e->kind != BBREC_OBSERVE) continue;
+        if (e->address + e->length > r->header.tcb_address && e->address < r->header.tcb_address + 8) continue;
+        const uint8_t *data = event_data(e);
+        for (uint32_t b = 0; b < e->length; ++b) {
+            uint64_t address = e->address + b;
+            if (address >= n->frame_lo && address < n->frame_hi) {
+                int best = -1;
+                for (int i = 0; i < n->pointer_count; ++i)
+                    if (n->pointers[i].recorded <= address && address - n->pointers[i].recorded < 4096 &&
+                        (best < 0 || n->pointers[i].recorded > n->pointers[best].recorded))
+                        best = i;
+                if (best < 0) continue; /* the original's own frame: not the native function's */
+                *(uint8_t *)(n->pointers[best].native + (address - n->pointers[best].recorded)) = data[b];
+                continue;
+            }
+            *(uint8_t *)address = data[b];
+            uint8_t *base = baseline_of(n, address);
+            if (base) *base = data[b];
+        }
+    }
+}
+
+static void native_fail(NativeReplay *n, const char *format, ...) __attribute__((format(printf, 2, 3)));
+static void native_fail(NativeReplay *n, const char *format, ...) {
+    if (n->failures++ < 8 || verbose) {
+        va_list args;
+        va_start(args, format);
+        printf("    ");
+        vprintf(format, args);
+        printf("\n");
+        va_end(args);
+    }
+}
+
+/* api.call: a call the native function makes, answered from the record. */
+static void native_call(uint64_t fn, const BbCallIn *in, BbCallOut *out) {
+    NativeReplay *n = active;
+    const Record *r = n->record;
+    collect(n);
+    memset(out, 0, sizeof(*out));
+    const BbRecEvent *e;
+    while ((e = event_at(r, n->cursor)) && e->kind != BBREC_CALL && e->kind != BBREC_EXIT)
+        n->cursor = event_next(r, n->cursor);
+    if (!e || e->kind != BBREC_CALL) {
+        native_fail(n, "call of %#" PRIx64 " that the record does not have", fn);
+        return;
+    }
+    const BbRecRegs *call = event_data(e);
+    if (e->address != fn) native_fail(n, "call of %#" PRIx64 ", recorded %#" PRIx64, fn, e->address);
+    static const int args[6] = {RDI, RSI, RDX, RCX, R8, R9};
+    n->pointer_count = 0;
+    for (uint32_t i = 0; i < in->gpr_count && i < 6; ++i) {
+        const uint64_t recorded = call->r[args[i]];
+        if (recorded >= n->frame_lo && recorded < n->frame_hi) { /* a pointer into the frame */
+            if (n->pointer_count < 16) n->pointers[n->pointer_count++] = (typeof(n->pointers[0])){recorded, in->gpr[i]};
+            continue;
+        }
+        if (in->gpr[i] != recorded)
+            native_fail(n, "call of %#" PRIx64 ": argument %u %#" PRIx64 ", recorded %#" PRIx64, fn, i + 1, in->gpr[i], recorded);
+    }
+    for (uint32_t i = 0; i < in->xmm_count && i < 8; ++i)
+        if (memcmp(in->xmm[i], call->v[i], 16)) native_fail(n, "call of %#" PRIx64 ": xmm%u differs", fn, i);
+    n->cursor = event_next(r, n->cursor);
+    e = event_at(r, n->cursor);
+    if (!e || e->kind != BBREC_RETURN) {
+        native_fail(n, "record: no return after the call of %#" PRIx64, fn);
+        return;
+    }
+    const BbRecRegs *ret = event_data(e);
+    out->rax = ret->r[RAX];
+    out->rdx = ret->r[RDX];
+    memcpy(out->xmm0, ret->v[0], 16);
+    memcpy(out->xmm1, ret->v[1], 16);
+    n->cursor = event_next(r, n->cursor);
+    native_epoch(n, n->cursor);
+}
+
+static int replay_native(const Record *r) {
+    NativeReplay n = {.record = r, .frame_lo = r->entry.r[RSP] - (1 << 20), .frame_hi = r->entry.r[RSP]};
+    active = &n;
+    n.pages = tracked_count + (size_t)((image_data_hi - image_data_lo) / 16384);
+    n.baseline = calloc(n.pages, sizeof(*n.baseline));
+    for (size_t i = 0; i < n.pages; ++i) n.baseline[i] = malloc(16384);
+    native_epoch(&n, 0);
+    for (size_t i = 0; i < n.pages; ++i) memcpy(n.baseline[i], (const void *)page_address(&n, i), 16384);
+    /* The arguments: as the game's bridge passes them (BbHostArgs). */
+    BbHostArgs a;
+    memset(&a, 0, sizeof(a));
+    static const int args[6] = {RDI, RSI, RDX, RCX, R8, R9};
+    for (int i = 0; i < 6; ++i) a.gpr[i] = r->entry.r[args[i]];
+    const uint64_t stack_args = r->entry.r[RSP] + 8;
+    if (baseline_of(&n, stack_args) && baseline_of(&n, stack_args + sizeof(a.stack) - 1))
+        memcpy(a.stack, (const void *)stack_args, sizeof(a.stack));
+    a.gpr[6] = a.stack[0];
+    a.gpr[7] = a.stack[1];
+    for (int i = 0; i < 8; ++i) memcpy(a.xmm[i].b, r->entry.v[i], 16);
+    bbcpu_hostcall(native_function->function, &a);
+    collect(&n);
+
+    const BbRecEvent *e;
+    while ((e = event_at(r, n.cursor)) && e->kind != BBREC_EXIT && e->kind != BBREC_CALL)
+        n.cursor = event_next(r, n.cursor);
+    if (!e || e->kind != BBREC_EXIT) {
+        native_fail(&n, "returned before the record's calls");
+    } else {
+        const BbRecRegs *exit = event_data(e);
+        switch (native_function->returns) {
+        case BB_RETURNS_I32:
+            if ((uint32_t)a.rax != (uint32_t)exit->r[RAX])
+                native_fail(&n, "returned %#x, recorded %#x", (uint32_t)a.rax, (uint32_t)exit->r[RAX]);
+            break;
+        case BB_RETURNS_I64:
+            if (a.rax != exit->r[RAX]) native_fail(&n, "returned %#" PRIx64 ", recorded %#" PRIx64, a.rax, exit->r[RAX]);
+            break;
+        case BB_RETURNS_F32:
+            if (memcmp(a.xmm0.b, exit->v[0], 4)) native_fail(&n, "returned float differs");
+            break;
+        case BB_RETURNS_F64:
+            if (memcmp(a.xmm0.b, exit->v[0], 8)) native_fail(&n, "returned double differs");
+            break;
+        default:
+            break;
+        }
+    }
+    /* The bytes the original wrote (outside its frame) against the native function's. */
+    ByteMap expected = {0};
+    for (uint64_t offset = 0; event_at(r, offset); offset = event_next(r, offset)) {
+        e = event_at(r, offset);
+        if (e->kind != BBREC_WRITE) continue;
+        for (uint32_t b = 0; b < e->length; ++b) {
+            const uint64_t address = e->address + b;
+            if (address >= n.frame_lo && address < n.frame_hi + 8) continue;
+            map_put(&expected, address, ((const uint8_t *)event_data(e))[b]);
+        }
+    }
+    uint64_t wrong = 0, extra = 0;
+    for (size_t i = 0; i < expected.capacity; ++i) {
+        if (!expected.keys[i]) continue;
+        const uint64_t address = expected.keys[i] - 1;
+        uint8_t value;
+        if (!map_get(&n.written, address, &value)) value = *(const uint8_t *)address; /* unchanged */
+        if (value != expected.values[i] && wrong++ < 4)
+            native_fail(&n, "%#" PRIx64 " = %#x, recorded %#x", address, value, expected.values[i]);
+    }
+    for (size_t i = 0; i < n.written.capacity; ++i) {
+        uint8_t value;
+        if (n.written.keys[i] && !map_get(&expected, n.written.keys[i] - 1, &value) && extra++ < 4)
+            native_fail(&n, "written, not in the record: %#" PRIx64, n.written.keys[i] - 1);
+    }
+    if (wrong + extra)
+        native_fail(&n, "%" PRIu64 " bytes wrong, %" PRIu64 " extra (of %zu)", wrong, extra, expected.count);
+    if (verbose || !n.failures) printf("    native: %u calls, %zu bytes written\n", r->header.calls, expected.count);
+    return n.failures ? 1 : 0;
 }
 
 static int replay(const Record *r) {
@@ -227,6 +444,7 @@ static int replay(const Record *r) {
         printf("    not replayable here: %#" PRIx64 " is this process's memory\n", in_use);
         return 2;
     }
+    if (native_function) return replay_native(r);
     Replay p = {.record = r};
     static BbCpu cpu;
     memset(&cpu, 0, sizeof(cpu));
@@ -329,22 +547,27 @@ static void map_image(const char *path, uint64_t base) {
         if (ph->p_flags & 1) bbcpu_add_guest_code(base + ph->p_vaddr, ph->p_memsz);
         if (!image_lo || start < image_lo) image_lo = start;
         if (end > image_hi) image_hi = end;
+        if (ph->p_flags & 2) {
+            image_data_lo = start;
+            image_data_hi = end;
+        }
     }
     free(data);
 }
 
 int main(int argc, char **argv) {
-    const char *records = NULL, *elf = "out/eboot.elf";
+    const char *records = NULL, *elf = "out/eboot.elf", *native_library = NULL;
     long only = -1;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--elf") && i + 1 < argc) elf = argv[++i];
         else if (!strcmp(argv[i], "--only") && i + 1 < argc) only = atol(argv[++i]);
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
         else if (!strcmp(argv[i], "--nofork")) no_fork = 1; /* one record (--only), in a debugger */
+        else if (!strcmp(argv[i], "--native") && i + 1 < argc) native_library = argv[++i];
         else records = argv[i];
     }
     if (!records) {
-        fprintf(stderr, "usage: %s RECORDS [--elf ELF] [--only N] [--verbose]\n", argv[0]);
+        fprintf(stderr, "usage: %s RECORDS [--elf ELF] [--only N] [--verbose] [--native LIB]\n", argv[0]);
         return 2;
     }
     /* Read whole: the children must not share a file position with this process. */
@@ -376,6 +599,26 @@ int main(int argc, char **argv) {
         if (!mapped) {
             map_image(elf, r.header.image_base);
             mapped = 1;
+            if (native_library) {
+                /* The native version of the recorded function, with calls answered here. */
+                static BbNativeApi api;
+                api = (BbNativeApi){.version = BB_NATIVE_API_VERSION, .image_base = r.header.image_base,
+                                    .call = native_call};
+                void *library = dlopen(native_library, RTLD_NOW | RTLD_LOCAL);
+                BbNativeInit init = library ? (BbNativeInit)dlsym(library, BB_NATIVE_INIT) : NULL;
+                if (!init) {
+                    fprintf(stderr, "%s: %s\n", native_library, dlerror());
+                    return 1;
+                }
+                size_t count = 0;
+                const BbNativeFunction *functions = init(&api, &count);
+                for (size_t i = 0; i < count; ++i)
+                    if (functions[i].offset == r.header.offset) native_function = &functions[i];
+                if (!native_function) {
+                    fprintf(stderr, "%s: no native version of %#" PRIx64 "\n", native_library, r.header.offset);
+                    return 1;
+                }
+            }
         }
         printf("record %d (call %" PRIu64 " of %#" PRIx64 "):", number, r.header.index, r.header.offset);
         if (r.header.failed) {

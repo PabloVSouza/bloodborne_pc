@@ -9,7 +9,7 @@ clang -arch x86_64 -O2 -mavx -msse4.1 -mpopcnt -fno-builtin -fno-stack-protector
     tests/jit_guest.c -o out/jit_guest
 ROSETTA_ADVERTISE_AVX=1 out/jit_guest > out/jit_guest.expected
 clang -arch arm64 -O2 -std=gnu11 -I$D/include tests/test_jit.c src/cpu/cpu.c src/cpu/decode.c \
-    src/cpu/interp.c src/cpu/interp_vec.c src/cpu/interp_x87.c src/cpu/record.c src/cpu/jit_arm64.c \
+    src/cpu/interp.c src/cpu/interp_vec.c src/cpu/interp_x87.c src/cpu/record.c src/cpu/native.c src/cpu/jit_arm64.c \
     src/cpu/hostcall.S $D/lib/libZydis.a $D/lib/libZycore.a -o out/test_jit
 echo "== interpreter"; BB_JIT=0 out/test_jit out/jit_guest out/jit_guest.expected
 echo "== JIT"; out/test_jit out/jit_guest out/jit_guest.expected

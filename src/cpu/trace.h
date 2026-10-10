@@ -40,4 +40,9 @@ int bbcpu_record_target(uint64_t rip);
 int bbcpu_record_wants(uint64_t rip);
 uint64_t bbcpu_record_call(BbCpu *cpu);
 
+/* Native versions of game functions (native.c): the host function replacing `address`, or NULL. */
+extern int bbcpu_native_count;
+extern uint64_t bbcpu_native_calls; /* calls run natively (statistics) */
+const void *bbcpu_native_at(uint64_t address);
+
 #endif

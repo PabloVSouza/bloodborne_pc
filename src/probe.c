@@ -566,6 +566,7 @@ int main(int argc, char **argv) {
     bb_image_base = (uint64_t)(uintptr_t)image;
     /* Profiles of guest code (tools/decomp/profile.py) turn addresses into image offsets. */
     printf("Image: game image at %#llx\n", (unsigned long long)bb_image_base);
+    runtime_native_load(bb_image_base);
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
     if (!cpu_only) {

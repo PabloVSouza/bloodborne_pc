@@ -1,5 +1,6 @@
 // tools/decomp/ghidra/Decompile.java OUTDIR OFFSET...: Ghidra's C for functions of the game image, one
-// file per function (OUTDIR/<offset>.c), without analyzing the whole image (docs/DECOMPILATION.md).
+// file per function (OUTDIR/<offset>.c, its instructions in OUTDIR/<offset>.s), without analyzing
+// the whole image (docs/DECOMPILATION.md).
 // Offsets are image offsets (tools/decomp/scan.c); each function is disassembled and created where
 // the unwind tables put it. Run through tools/decomp/decompile.sh.
 // @category bbport
@@ -15,6 +16,7 @@ import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Instruction;
 
 public class Decompile extends GhidraScript {
     @Override
@@ -46,6 +48,12 @@ public class Decompile extends GhidraScript {
                     writer.println(result.getDecompiledFunction().getC());
                 } else {
                     writer.println("// decompilation failed: " + result.getErrorMessage());
+                }
+            }
+            // The instructions too (image offsets): what the C must do exactly (floating point).
+            try (PrintWriter writer = new PrintWriter(new File(out, name + ".s"))) {
+                for (Instruction in : currentProgram.getListing().getInstructions(function.getBody(), true)) {
+                    writer.printf("%8x  %s%n", in.getAddress().subtract(base), in.toString());
                 }
             }
             println(name + ": " + (result.decompileCompleted() ? "ok" : result.getErrorMessage()));

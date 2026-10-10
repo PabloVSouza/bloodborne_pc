@@ -22,6 +22,13 @@ int bbcpu_enabled(void);
 void bbcpu_add_guest_code(uintptr_t start, size_t size);
 /* Calls guest function `fn` on this thread with up to 6 integer arguments; returns rax. */
 uint64_t bbcpu_call(uintptr_t fn, int count, const uint64_t *args);
+/* Like bbcpu_call with SysV integer arguments (rdi rsi rdx rcx r8 r9) and vector ones (xmm0-7);
+ * rax, rdx and xmm0, xmm1 back. */
+void bbcpu_call_full(uintptr_t fn, const uint64_t gpr[6], const uint8_t xmm[8][16], uint64_t out_gpr[2],
+                     uint8_t out_xmm[2][16]);
+/* Native versions of game functions (docs/DECOMPILATION.md): a call of guest `address` runs host
+ * function `fn` (SysV arguments bridged, like a host import). Set before guest code runs. */
+void bbcpu_set_native(uint64_t address, const void *fn);
 /* Like bbcpu_call on a new guest stack [stack, stack + size) (thread entry, game entry). */
 uint64_t bbcpu_call_on_stack(uintptr_t fn, int count, const uint64_t *args, void *stack,
                              size_t size);

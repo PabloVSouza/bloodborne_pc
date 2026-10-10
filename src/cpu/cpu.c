@@ -113,6 +113,32 @@ uint64_t bbcpu_call(uintptr_t fn, int count, const uint64_t *args) {
     return result;
 }
 
+void bbcpu_call_full(uintptr_t fn, const uint64_t gpr[6], const uint8_t xmm[8][16], uint64_t out_gpr[2],
+                     uint8_t out_xmm[2][16]) {
+    BbCpu *cpu = current_cpu();
+    /* bbcpu_call sets the integer arguments; the vector ones go in first (a nested call keeps
+     * the outer state, vectors included, and restores it after). */
+    if (cpu->depth) {
+        BbCpu saved = *cpu;
+        for (int i = 0; i < 8; ++i) memcpy(cpu->v[i].b, xmm[i], 16);
+        ++cpu->depth;
+        out_gpr[0] = run_call(cpu, fn, 6, gpr, cpu->r[RSP] - RED_ZONE - 64);
+        --cpu->depth;
+        out_gpr[1] = cpu->r[RDX];
+        memcpy(out_xmm[0], cpu->v[0].b, 16);
+        memcpy(out_xmm[1], cpu->v[1].b, 16);
+        const uint64_t instructions = cpu->instructions;
+        *cpu = saved;
+        cpu->instructions = instructions;
+        return;
+    }
+    for (int i = 0; i < 8; ++i) memcpy(cpu->v[i].b, xmm[i], 16);
+    out_gpr[0] = bbcpu_call(fn, 6, gpr);
+    out_gpr[1] = cpu->r[RDX];
+    memcpy(out_xmm[0], cpu->v[0].b, 16);
+    memcpy(out_xmm[1], cpu->v[1].b, 16);
+}
+
 uint64_t bbcpu_call_on_stack(uintptr_t fn, int count, const uint64_t *args, void *stack, size_t size) {
     BbCpu *cpu = current_cpu();
     ++cpu->depth;
@@ -146,4 +172,5 @@ void bbcpu_report(void) {
     printf("bbcpu: %" PRIu64 " threads, %" PRIu64 " blocks / %" PRIu64 " instructions decoded, %"
            PRIu64 " blocks translated, %" PRIu64 " instructions interpreted from translated code\n",
            cpus_created, blocks, insns, translated, fallbacks);
+
 }
