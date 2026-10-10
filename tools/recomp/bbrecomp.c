@@ -216,6 +216,18 @@ typedef struct { uint64_t start, end; } Range;
 /* The functions being recompiled, by offset: calls of them go through their direct-call slot
  * (d_<offset>, rc.h) when the program filled it. */
 static uint64_t *recompiled;
+/* Import stubs by name (imports.tsv): calls of them are labelled. */
+typedef struct { uint64_t stub; char name[64]; } Import;
+static Import *imports;
+static size_t import_count;
+static const char *import_name(uint64_t t) {
+    for (size_t lo = 0, hi = import_count; lo < hi;) {
+        const size_t mid = (lo + hi) / 2;
+        if (imports[mid].stub == t) return imports[mid].name;
+        if (imports[mid].stub < t) lo = mid + 1; else hi = mid;
+    }
+    return NULL;
+}
 static int by_offset(const void *a, const void *b);
 static int is_recompiled(uint64_t t) {
     return recompiled && bsearch(&t, recompiled, function_count, sizeof(*recompiled), by_offset) != NULL;
@@ -390,6 +402,7 @@ static int translate(Range f, uint64_t off, const BbInsn *in, uint64_t *stats) {
                 return 1;
             }
             b = str("B + 0x%" PRIx64 "ull", t);
+            if (import_name(t)) emit("/* %s */ ", import_name(t));
         } else if (!read_op(off, in, d, 8, &b)) {
             return 0;
         }
@@ -1221,6 +1234,12 @@ int main(int argc, char **argv) {
         while (f && fgets(line, sizeof(line), f)) {
             char name[256];
             unsigned long long stub;
+            if (sscanf(line, "%llx\t%255s", &stub, name) == 2) {
+                imports = realloc(imports, (import_count + 1) * sizeof(*imports));
+                imports[import_count].stub = stub;
+                snprintf(imports[import_count].name, sizeof(imports[import_count].name), "%s", name);
+                ++import_count; /* imports.tsv is sorted */
+            }
             if (sscanf(line, "%llx\t%255s", &stub, name) == 2 &&
                 (!strcmp(name, "setjmp") || !strcmp(name, "_setjmp") || !strcmp(name, "sigsetjmp")) && jump_count < 8)
                 jumps[jump_count++] = stub;
@@ -1241,6 +1260,15 @@ int main(int argc, char **argv) {
         }
         if (f) fclose(f);
         if (skipped) printf("%zu functions call setjmp: left to the translator\n", skipped);
+        /* Import stubs (a jump through a slot the loader fills) stay too: recompiled, the jump is a
+         * tail call through the runtime, which puts its own return address on the stack, and
+         * setjmp saved that one. They gain nothing in C. */
+        size_t stubs = 0;
+        for (size_t i = 0; i < function_count;) {
+            if (import_name(functions[i].offset)) { functions[i] = functions[--function_count]; ++stubs; }
+            else ++i;
+        }
+        if (stubs) printf("%zu import stubs: left to the translator\n", stubs);
     }
     /* By offset, once each. */
     qsort(functions, function_count, sizeof(*functions), by_offset); /* offset first in Function */
