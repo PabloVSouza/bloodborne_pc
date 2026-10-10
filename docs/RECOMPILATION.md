@@ -48,6 +48,23 @@ The recompiled code is produced on the player's machine from their copy, and sta
 | R4 | Annotations: names, signatures and structs make the generated C readable | |
 | R5 | The engine's graphics on Metal, at the libGnm boundary | |
 
+## Progress
+
+*2026-10-10.* The game's executable has 241,821 functions, about 11.3 million instructions.
+
+| | Progress | |
+|---|---|---|
+| Functions recompiled, running in the game | `████░░░░░░░░░░░░░░░░` 20.3% | 49,071 of 241,821 |
+| Instructions recompiled | `█████░░░░░░░░░░░░░░░` 27.2% | 3,063,245 of 11,268,132 |
+| Instructions in plain C (of those recompiled) | `████████████████████` 99.8% | 3,057,104 of 3,063,245 |
+| Functions checked call by call (recordings) | `░░░░░░░░░░░░░░░░░░░░` 0.4% | 933 of 241,821 |
+| Functions labelled by library | `█████████░░░░░░░░░░░` 44.1% | 106,659 of 241,821 |
+
+The recompiled functions are all those a 3-minute route through the Hunter's Dream runs; the rest
+are generated the same way once a route reaches them, or all at once. Every recompiled function
+runs in the game; the call-by-call checks cover the busiest, and the fuzzing covers every
+instruction form the generator handles.
+
 ## The recompiler
 
 `tools/recomp/bbrecomp.c` reads `eboot.bin`, takes functions from the function table
