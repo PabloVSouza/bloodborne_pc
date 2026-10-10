@@ -13,6 +13,7 @@
  * BB_JIT=0 runs the interpreter instead. */
 #include "cpu_internal.h"
 #include "a64.h"
+#include "trace.h"
 
 #if defined(__aarch64__) && defined(__APPLE__)
 #include <libkern/OSCacheControl.h>
@@ -2188,7 +2189,9 @@ static void *translate(BbBlock *block) {
     uint32_t *start = code_next;
     uint64_t rip = block->start;
     int ended = 0, translated = 0;
-    for (uint32_t i = 0; i < block->count && !ended; ++i) {
+    /* BB_RECORD: a recorded function's first instruction goes through bbcpu_step (record.c). */
+    const int recorded = bbcpu_record_armed && bbcpu_record_target(block->start);
+    for (uint32_t i = 0; i < block->count && !ended && !recorded; ++i) {
         const BbInsn *in = &block->insn[i];
         t.rip = rip;
         int handled;

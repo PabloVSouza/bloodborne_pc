@@ -1,6 +1,7 @@
 /* bbcpu interpreter: integer instructions, control flow and the guest -> host call bridge.
  * Vector and x87 instructions are in interp_vec.c and interp_x87.c. Flags are computed eagerly. */
 #include "cpu_internal.h"
+#include "trace.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -894,6 +895,9 @@ static uint64_t step(BbCpu *cpu, const BbInsn *in) {
 /* x86 locked instructions (and xchg with memory) are full barriers; arm64's acquire/release
  * atomics are not (a failed CAS only acquires), so the barriers are explicit. */
 uint64_t bbcpu_step(BbCpu *cpu, const BbInsn *in) {
+    /* BB_RECORD: a call of a recorded function runs in the recorder (record.c). */
+    if (__builtin_expect(bbcpu_record_armed, 0) && bbcpu_record_wants(cpu->rip))
+        return bbcpu_record_call(cpu);
     const int locked = in->lock || (in->mnemonic == M(XCHG) &&
                                     (in->op[0].type == OP_MEM || in->op[1].type == OP_MEM));
     if (!locked) return step(cpu, in);

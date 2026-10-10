@@ -10,6 +10,12 @@
 #include <sched.h>
 #include <pthread.h>
 #include <unistd.h>
+#ifndef _WIN32
+#include <sys/mman.h>
+#else
+#define PROT_READ 1
+#define PROT_WRITE 2
+#endif
 
 typedef struct {
     union { GuestCallback plain; void (ABI *with_arg)(void *); } callback;
@@ -20,7 +26,11 @@ static ExitHandler *handlers;
 static size_t handler_count, handler_capacity, calls_init, calls_atexit, calls_cxa;
 static uint64_t capabilities;
 static _Atomic size_t guards_acquired, guards_released;
-static uint64_t stack_canary;
+/* Variables the game imports: in guest memory where there is some (runtime_low_map), like the
+ * PS4's, so that the game's code touches only guest memory (recorded calls, src/cpu/record.c,
+ * replay in another process). */
+typedef struct { uint64_t stack_canary; int32_t need_libc_internal; } ImportedData;
+static ImportedData *imported_data;
 static _Atomic size_t memory_calls;
 /* Dynamic TLS of linked modules: module IDs 2..7 (1 is the eboot's static TLS). */
 #define TLS_MODULES 8
@@ -72,6 +82,11 @@ static ABI void *guest_tls_get_addr(const uint64_t *index) {
 void runtime_start(uint64_t flags) {
     capabilities = flags;
     if (!(flags & 1)) return;
+    static ImportedData host_data;
+    imported_data = runtime_low_map(sizeof(ImportedData), PROT_READ | PROT_WRITE);
+    if (!imported_data) imported_data = &host_data;
+    imported_data->need_libc_internal = 1; /* SDK marker variable referenced by Fios2 */
+    uint64_t stack_canary;
 #ifdef _WIN32
     unsigned int halves[2];
     if (rand_s(&halves[0]) || rand_s(&halves[1])) { fputs("Cannot initialize stack canary\n", stderr); exit(1); }
@@ -83,7 +98,7 @@ void runtime_start(uint64_t flags) {
     }
     fclose(random);
 #endif
-    stack_canary &= ~UINT64_C(255);
+    imported_data->stack_canary = stack_canary & ~UINT64_C(255);
 }
 void runtime_report(void) {
     printf("Runtime: _init_env=%zu, atexit=%zu, __cxa_atexit=%zu, registered handlers=%zu\n",
@@ -222,9 +237,8 @@ static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {
 uintptr_t runtime_resolve(const char *name, int is_data) {
     if (!(capabilities & 1)) return 0;
     if (is_data) {
-        static int32_t need_libc_internal = 1; /* SDK marker variable referenced by Fios2 */
-        if (!strcmp(name, "f7uOxY9mM1U#p#J")) return (uintptr_t)&stack_canary;
-        if (!strcmp(name, "ZT4ODD2Ts9o#libSceLibcInternal")) return (uintptr_t)&need_libc_internal;
+        if (!strcmp(name, "f7uOxY9mM1U#p#J")) return (uintptr_t)&imported_data->stack_canary;
+        if (!strcmp(name, "ZT4ODD2Ts9o#libSceLibcInternal")) return (uintptr_t)&imported_data->need_libc_internal;
         return 0;
     }
     /* Exact scoped imports for CUSA03173; the suffix identifies library/module. */
