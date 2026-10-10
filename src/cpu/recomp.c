@@ -164,6 +164,23 @@ static int no_direct(void) {
     return value;
 }
 
+/* An import stub (jmp [rip+slot]) whose slot holds a host function (the runtime's libraries):
+ * that function at once, with the return address on top of the guest stack, without the
+ * translator (a _setjmp and its dispatch loop). 1: done, cpu->rip is where it returned to. */
+static int call_import(BbCpu *cpu, uint64_t target) {
+    if (!bbcpu_is_guest_code(target)) return 0;
+    const uint8_t *code = (const uint8_t *)(uintptr_t)target;
+    if (code[0] != 0xff || code[1] != 0x25) return 0;
+    int32_t disp;
+    memcpy(&disp, code + 2, 4);
+    const uint64_t host = bb_load(target + 6 + (uint64_t)(int64_t)disp, 8);
+    if (!host || bbcpu_is_guest_code(host)) return 0;
+    __atomic_add_fetch(&host_calls, 1, __ATOMIC_RELAXED);
+    cpu->rip = host;
+    bbcpu_call_host_at_rip(cpu); /* pops the return address into rip */
+    return 1;
+}
+
 static void rc_call(BbCpu *cpu, uint64_t target, uint64_t next) {
     const RcFn fn = no_direct() || !bbcpu_recomp_thread_ok() ? NULL : bbcpu_recomp_at(target);
     cpu->r[RSP] -= 8;
@@ -174,23 +191,8 @@ static void rc_call(BbCpu *cpu, uint64_t target, uint64_t next) {
         fn(cpu);
         return;
     }
-    /* An import stub (jmp [rip+slot]) whose slot holds a host function (the runtime's libraries):
-     * that function at once, returning to `next`, without the translator. */
-    if (bbcpu_is_guest_code(target)) {
-        const uint8_t *code = (const uint8_t *)(uintptr_t)target;
-        if (code[0] == 0xff && code[1] == 0x25) {
-            int32_t disp;
-            memcpy(&disp, code + 2, 4);
-            const uint64_t host = bb_load(target + 6 + (uint64_t)(int64_t)disp, 8);
-            if (host && !bbcpu_is_guest_code(host)) {
-                __atomic_add_fetch(&host_calls, 1, __ATOMIC_RELAXED);
-                bb_store(cpu->r[RSP], 8, next);
-                cpu->rip = host;
-                bbcpu_call_host_at_rip(cpu); /* returns with rip at `next` */
-                return;
-            }
-        }
-    }
+    bb_store(cpu->r[RSP], 8, next);
+    if (call_import(cpu, target)) return;
     /* The translator (and natives, imports: bbcpu_run calls them). */
     cpu->rip = target;
     run_translated(cpu, cpu->r[RSP]);
@@ -204,6 +206,7 @@ static void rc_tail(BbCpu *cpu) {
         fn(cpu);
         return;
     }
+    if (call_import(cpu, cpu->rip)) return; /* a tail call of an import: it returns for us */
     const uint64_t back = bb_load(cpu->r[RSP], 8);
     run_translated(cpu, cpu->r[RSP]);
     cpu->rip = back;

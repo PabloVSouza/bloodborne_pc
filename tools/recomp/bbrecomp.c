@@ -1043,12 +1043,58 @@ static int insn_order(const void *a, const void *b) {
     const uint64_t x = ((const Insn *)a)->off, y = ((const Insn *)b)->off;
     return x < y ? -1 : x > y;
 }
+/* Targets of the jump tables decode found (labels too), for the function being generated. */
+static uint64_t *table_targets;
+static size_t table_target_count, table_target_capacity;
+
+/* A compiler's jump table ending at list[n - 1] (jmp reg): lea T, [rip + table]; movsxd C,
+ * dword [T + 4 * I]; add C, T; jmp C, its size from cmp I, N; ja (N + 1 entries). Its targets
+ * are pushed to `work` and kept in table_targets; 0 if it is not one. */
+static int jump_table(Function fn, const Insn *list, size_t n, uint64_t *work, size_t *pending, const uint8_t *seen) {
+    if (n < 4) return 0;
+    const BbInsn *jmp = &list[n - 1].in, *add = &list[n - 2].in, *load = &list[n - 3].in;
+    if (jmp->op[0].type != OP_REG || jmp->op[0].kind != RK_GPR || jmp->op[0].size != 8) return 0;
+    const int c = jmp->op[0].reg;
+    if (add->mnemonic != M(ADD) || add->op[0].type != OP_REG || add->op[0].reg != c || add->op[1].type != OP_REG ||
+        add->op[0].size != 8) return 0;
+    const int t = add->op[1].reg;
+    if (load->mnemonic != M(MOVSXD) || load->op[0].type != OP_REG || load->op[0].reg != c || load->op[1].type != OP_MEM ||
+        load->op[1].base != t || load->op[1].scale != 4 || load->op[1].index == 0xff || load->op[1].disp != 0) return 0;
+    const int index = load->op[1].index;
+    uint64_t table = 0, entries = 0;
+    for (size_t k = n - 3; k-- > 0 && k + 12 > n;) {
+        const Insn *x = &list[k];
+        if (!table && x->in.mnemonic == M(LEA) && x->in.op[0].type == OP_REG && x->in.op[0].reg == t &&
+            x->in.op[1].base == 0xfe && x->in.op[1].index == 0xff)
+            table = x->off + x->in.length + (uint64_t)x->in.op[1].disp;
+        if (!entries && x->in.mnemonic == M(CMP) && x->in.op[0].type == OP_REG && x->in.op[0].reg == index &&
+            x->in.op[1].type == OP_IMM && k + 1 < n && list[k + 1].in.mnemonic == M(JNBE))
+            entries = (uint64_t)x->in.op[1].disp + 1;
+    }
+    if (!table || !entries || entries > 4096) return 0;
+    for (uint64_t e = 0; e < entries; ++e) {
+        int32_t rel;
+        memcpy(&rel, (const void *)(uintptr_t)(base + table + 4 * e), 4);
+        const uint64_t target = table + (uint64_t)(int64_t)rel;
+        if (target < fn.offset || target >= fn.offset + fn.size) return 0; /* not what it looked like */
+        if (table_target_count == table_target_capacity) {
+            table_target_capacity = table_target_capacity ? table_target_capacity * 2 : 256;
+            table_targets = realloc(table_targets, table_target_capacity * sizeof(*table_targets));
+        }
+        table_targets[table_target_count++] = target;
+        if (!seen[target - fn.offset]) work[(*pending)++] = target;
+    }
+    return 1;
+}
+
 static Insn *decode(Function fn, size_t *count) {
     Insn *list = NULL;
     size_t n = 0, capacity = 0;
     uint8_t *seen = calloc(fn.size + 16, 1);
-    uint64_t *work = malloc((fn.size + 16) * sizeof(*work));
+    size_t work_capacity = fn.size + 16 + 4096;
+    uint64_t *work = malloc(work_capacity * sizeof(*work));
     size_t pending = 0;
+    table_target_count = 0;
     work[pending++] = fn.offset;
     while (pending) {
         uint64_t off = work[--pending];
@@ -1071,6 +1117,8 @@ static Insn *decode(Function fn, size_t *count) {
                     const uint64_t t = off + (uint64_t)in->op[0].disp;
                     if (t >= fn.offset && t < fn.offset + fn.size && !seen[t - fn.offset]) work[pending++] = t;
                 }
+                if (m == M(JMP) && in->op[0].type == OP_REG && pending + 4096 < work_capacity)
+                    jump_table(fn, list, n, work, &pending, seen);
                 /* No fall-through after these. */
                 if (m == M(JMP) || m == M(RET) || m == M(INVALID) || m == M(UD2) || m == M(HLT)) ended = 2;
                 off += in->length;
@@ -1102,9 +1150,10 @@ static void generate(Function fn, uint64_t *stats) {
     const Range f = {fn.offset, fn.offset + fn.size};
     /* Labels only where a direct jump goes (and the entry): every other address an indirect jump
      * or an interpreted branch reaches goes back to the translator (L_dispatch). */
-    uint64_t *targets = malloc((count + 1) * sizeof(*targets));
+    uint64_t *targets = malloc((count + 1 + table_target_count) * sizeof(*targets));
     size_t target_count = 0;
     targets[target_count++] = f.start;
+    for (size_t i = 0; i < table_target_count; ++i) targets[target_count++] = table_targets[i]; /* jump tables */
     for (size_t i = 0; i < count; ++i) {
         const BbInsn *in = &list[i].in;
         const int cc = cc_of(in->mnemonic);
