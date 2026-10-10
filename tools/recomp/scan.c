@@ -1,4 +1,4 @@
-/* tools/decomp/scan.c ELF OUTDIR: the game's function table for the decompilation (docs/DECOMPILATION.md).
+/* tools/recomp/scan.c ELF OUTDIR: the game's function table for the decompilation (docs/RECOMPILATION.md).
  * Functions come from the unwind tables (PT_GNU_EH_FRAME: every function the compiler emitted
  * unwind information for, with its exact start and size). Each one is decoded with Zydis:
  *   OUTDIR/functions.tsv  address, size, instructions, undecodable bytes

@@ -1,5 +1,5 @@
-/* tools/decomp/replay.c RECORDS [--elf ELF] [--only N] [--verbose]: replays recorded calls of a game
- * function (BB_RECORD, src/cpu/record.c) and checks the result (docs/DECOMPILATION.md).
+/* tools/recomp/replay.c RECORDS [--elf ELF] [--only N] [--verbose]: replays recorded calls of a game
+ * function (BB_RECORD, src/cpu/record.c) and checks the result (docs/RECOMPILATION.md).
  *
  * Each record runs in a child process: the game image is mapped where it was, memory is rebuilt
  * from the record's observations, epoch by epoch, and the function runs in the interpreter. Its
@@ -11,7 +11,7 @@
  * version of the function runs instead (natively): its calls are answered the same way, and what it
  * wrote is found by comparing memory with a copy (the original's stack frame aside: the native
  * function has its own; a callee's writes to a buffer in the frame go to the buffer it passed).
- * Build: tools/decomp/replay.sh. */
+ * Build: tools/recomp/replay.sh. */
 #include "../../src/cpu/trace.h"
 #include "../../src/native/bbnative.h"
 #include <dlfcn.h>

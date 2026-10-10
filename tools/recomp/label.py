@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""tools/decomp/label.py OUTDIR: which library each function of the game belongs to, from the tables of
-tools/decomp/scan.c (docs/DECOMPILATION.md).
+"""tools/recomp/label.py OUTDIR: which library each function of the game belongs to, from the tables of
+tools/recomp/scan.c (docs/RECOMPILATION.md).
 
 1. Seeds: a function that references a source file path of its own (.cpp or .c: assertion and
    log messages) takes that file and its library. Header paths (.h, .inl) are inlined into the
@@ -46,7 +46,7 @@ def module_of(path):
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else 'out/decomp'
+    out = sys.argv[1] if len(sys.argv) > 1 else 'out/recomp'
     functions = []
     for line in open(f'{out}/functions.tsv'):
         if line.startswith('address'):

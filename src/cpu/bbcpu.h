@@ -26,7 +26,7 @@ uint64_t bbcpu_call(uintptr_t fn, int count, const uint64_t *args);
  * rax, rdx and xmm0, xmm1 back. */
 void bbcpu_call_full(uintptr_t fn, const uint64_t gpr[6], const uint8_t xmm[8][16], uint64_t out_gpr[2],
                      uint8_t out_xmm[2][16]);
-/* Native versions of game functions (docs/DECOMPILATION.md): a call of guest `address` runs host
+/* Native versions of game functions (docs/RECOMPILATION.md): a call of guest `address` runs host
  * function `fn` (SysV arguments bridged, like a host import). Set before guest code runs. */
 void bbcpu_set_native(uint64_t address, const void *fn);
 /* Like bbcpu_call on a new guest stack [stack, stack + size) (thread entry, game entry). */

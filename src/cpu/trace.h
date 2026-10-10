@@ -1,5 +1,5 @@
 /* bbcpu: running one guest function instruction by instruction with its memory accesses seen
- * (record.c): the recorder of BB_RECORD and tools/decomp/replay.c. */
+ * (record.c): the recorder of BB_RECORD and tools/recomp/replay.c. */
 #ifndef BB_CPU_TRACE_H
 #define BB_CPU_TRACE_H
 #include "cpu_internal.h"

@@ -1,5 +1,5 @@
-/* Recorded calls of game functions (src/cpu/record.c, docs/DECOMPILATION.md): the format shared by
- * the recorder in the game and tools/decomp/replay.c. Native layout (both sides are arm64 macOS).
+/* Recorded calls of game functions (src/cpu/record.c, docs/RECOMPILATION.md): the format shared by
+ * the recorder in the game and tools/recomp/replay.c. Native layout (both sides are arm64 macOS).
  *
  * A file holds records one after another: a BbRecHeader, the registers at the function's entry
  * (BbRecRegs), then `events` events (`bytes` bytes; none when `failed`). An event is a

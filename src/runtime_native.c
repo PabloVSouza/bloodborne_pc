@@ -1,4 +1,4 @@
-/* Native versions of the game's functions (docs/DECOMPILATION.md): BB_NATIVE_LIB names a library
+/* Native versions of the game's functions (docs/RECOMPILATION.md): BB_NATIVE_LIB names a library
  * (src/native/bbnative.h) whose functions replace the game's. BB_NATIVE_OFF=OFFSET,... leaves
  * chosen ones to the game's code (to find a wrong one by bisection). */
 #include "runtime.h"

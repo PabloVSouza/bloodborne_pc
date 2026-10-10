@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""tools/decomp/profile.py SAMPLE.txt JIT_MAP LOG [THREAD_SUBSTRING] [--out OUTDIR] [--top N]: CPU time of
-the game's own functions (docs/DECOMPILATION.md). Translated-code self samples from a macOS `sample`
+"""tools/recomp/profile.py SAMPLE.txt JIT_MAP LOG [THREAD_SUBSTRING] [--out OUTDIR] [--top N]: CPU time of
+the game's own functions (docs/RECOMPILATION.md). Translated-code self samples from a macOS `sample`
 file (tools/sample_guest.py) are given to the functions of OUTDIR/functions.tsv
-(tools/decomp/scan.c) and their modules (tools/decomp/label.py); LOG is the run's log, for the image
+(tools/recomp/scan.c) and their modules (tools/recomp/label.py); LOG is the run's log, for the image
 base ("Image: game image at"). A run: SAMPLE=1 tools/mac_bench.sh NAME BB_JIT_MAP=FILE.
 
 Writes OUTDIR/profile.tsv (address, samples, share of translated code, module, source) and prints the
@@ -28,7 +28,7 @@ def option(args, name, default):
 
 def main():
     args = sys.argv[1:]
-    out = option(args, '--out', 'out/decomp')
+    out = option(args, '--out', 'out/recomp')
     top = int(option(args, '--top', '40'))
     sample, jit_map, log = args[:3]
     thread = args[3] if len(args) > 3 else None

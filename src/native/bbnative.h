@@ -1,5 +1,5 @@
-/* Native versions of the game's functions (docs/DECOMPILATION.md): the interface between the
- * program (the game, tools/decomp/replay.c) and a library of native functions (BB_NATIVE_LIB).
+/* Native versions of the game's functions (docs/RECOMPILATION.md): the interface between the
+ * program (the game, tools/recomp/replay.c) and a library of native functions (BB_NATIVE_LIB).
  *
  * The library exports BB_NATIVE_INIT. A native function has the game function's SysV signature
  * (integer and pointer arguments, then float and vector ones, in order): the program calls it

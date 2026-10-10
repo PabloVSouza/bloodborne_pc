@@ -1,13 +1,13 @@
-/* bbcpu: recorded calls of game functions, for checking decompiled ones (docs/DECOMPILATION.md).
+/* bbcpu: recorded calls of game functions, for checking decompiled ones (docs/RECOMPILATION.md).
  *
- * BB_RECORD=OFFSET:SIZE[,OFFSET:SIZE...] (image offsets and sizes from tools/decomp/scan.c): calls of
+ * BB_RECORD=OFFSET:SIZE[,OFFSET:SIZE...] (image offsets and sizes from tools/recomp/scan.c): calls of
  * these functions are run by the tracer below, one instruction at a time, and written to
- * BB_RECORD_DIR/<offset>.rec (default out/decomp/records) in the format of record.h. BB_RECORD_CALLS
+ * BB_RECORD_DIR/<offset>.rec (default out/recomp/records) in the format of record.h. BB_RECORD_CALLS
  * calls per function (default 50), one of every BB_RECORD_EVERY (default 1).
  *
  * The tracer (bbcpu_trace) reads the memory each instruction accesses before and after it runs:
  * the first read of each byte in an epoch is an observation, a changed byte a write. Calls the
- * function makes run at full speed (callbacks); tools/decomp/replay.c answers them from the
+ * function makes run at full speed (callbacks); tools/recomp/replay.c answers them from the
  * record instead. */
 #include "trace.h"
 #include "record.h"
@@ -201,7 +201,7 @@ typedef struct {
 } Target;
 static Target targets[MAX_TARGETS];
 static int target_count, max_calls = 50, every = 1;
-static const char *directory = "out/decomp/records";
+static const char *directory = "out/recomp/records";
 int bbcpu_record_armed;
 static _Thread_local int in_record;
 static pthread_mutex_t file_lock = PTHREAD_MUTEX_INITIALIZER;

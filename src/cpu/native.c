@@ -1,4 +1,4 @@
-/* bbcpu: native versions of game functions (docs/DECOMPILATION.md). A call of a replaced function
+/* bbcpu: native versions of game functions (docs/RECOMPILATION.md). A call of a replaced function
  * reaches the dispatcher (the JIT leaves its first instruction untranslated), and bbcpu_step calls
  * the native function through the guest -> host bridge instead. */
 #include "trace.h"

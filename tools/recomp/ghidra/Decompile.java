@@ -1,8 +1,8 @@
-// tools/decomp/ghidra/Decompile.java OUTDIR OFFSET...: Ghidra's C for functions of the game image, one
+// tools/recomp/ghidra/Decompile.java OUTDIR OFFSET...: Ghidra's C for functions of the game image, one
 // file per function (OUTDIR/<offset>.c, its instructions in OUTDIR/<offset>.s), without analyzing
-// the whole image (docs/DECOMPILATION.md).
-// Offsets are image offsets (tools/decomp/scan.c); each function is disassembled and created where
-// the unwind tables put it. Run through tools/decomp/decompile.sh.
+// the whole image (docs/RECOMPILATION.md).
+// Offsets are image offsets (tools/recomp/scan.c); each function is disassembled and created where
+// the unwind tables put it. Run through tools/recomp/decompile.sh.
 // @category bbport
 
 import java.io.File;
