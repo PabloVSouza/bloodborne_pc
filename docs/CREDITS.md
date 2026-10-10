@@ -2,7 +2,7 @@
 
 [← Documentation](README.md)
 
-bloodborne_mac is licensed under the **GNU GPL v2 or later** ([LICENSE](../LICENSE)), like the
+This project is licensed under the **GNU GPL v2 or later** ([LICENSE](../LICENSE)), like the
 project it is based on.
 
 ## Based on

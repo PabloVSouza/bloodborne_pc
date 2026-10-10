@@ -1,9 +1,9 @@
 # Recompilation
 
 > [!NOTE]
-> This work happens on the [`recomp`](https://github.com/PabloVSouza/bloodborne_mac/tree/recomp)
+> This work happens on the [`recomp`](https://github.com/PabloVSouza/bloodborne-recomp/tree/recomp)
 > branch: the tools named below are there, not in `main` yet. Progress is tracked on the wiki:
-> [Recompilation status](https://github.com/PabloVSouza/bloodborne_mac/wiki/Recompilation-status).
+> [Recompilation status](https://github.com/PabloVSouza/bloodborne-recomp/wiki/Recompilation-status).
 
 Goal: the game's own code running as native arm64 code, compiled ahead of time instead of
 translated while the game runs, and in the end the engine's graphics drawing with Metal directly

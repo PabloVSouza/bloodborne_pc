@@ -59,13 +59,13 @@ game's functions out as C, compiled into a native library the game loads.
 
 Only the recompiler and its tools are published, never the game's code.
 The goal is a native port: the engine's graphics drawing with Metal directly. Progress:
-[Recompilation status](https://github.com/PabloVSouza/bloodborne_mac/wiki/Recompilation-status).
+[Recompilation status](https://github.com/PabloVSouza/bloodborne-recomp/wiki/Recompilation-status).
 
 ## Where it comes from
 
 Almost everything that makes the game run (the loader, the PS4 runtime, the renderer and its
 extensions, the upscalers and the patches) comes from
 [bbport](https://github.com/deadinside28/bloodborne_pc), the Linux port this project started from as
-a fork, and shadPS4. bloodborne_mac adds the macOS platform layer, the arm64 translator, the macOS
+a fork, and shadPS4. This project adds the macOS platform layer, the arm64 translator, the macOS
 app and the recompiler. Upstream's README is kept in
 [upstream/README.md](../upstream/README.md).

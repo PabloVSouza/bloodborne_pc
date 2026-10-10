@@ -14,7 +14,7 @@ Nothing else is needed: the app includes everything it uses to run the game.
 ## Install
 
 1. Download the latest DMG from the
-   [Releases page](https://github.com/PabloVSouza/bloodborne_mac/releases/latest)
+   [Releases page](https://github.com/PabloVSouza/bloodborne-recomp/releases/latest)
    (`bloodborne_mac-<version>-arm64.dmg`).
 2. Open the DMG and drag **Bloodborne** to **Applications**.
 3. Open **Bloodborne** from Applications.

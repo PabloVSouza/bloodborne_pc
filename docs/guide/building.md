@@ -17,8 +17,8 @@
 ## Build and run
 
 ```bash
-git clone --recursive https://github.com/PabloVSouza/bloodborne_mac.git
-cd bloodborne_mac
+git clone --recursive https://github.com/PabloVSouza/bloodborne-recomp.git
+cd bloodborne-recomp
 bash build.sh                                  # the first run also builds the libraries (deps/)
 BB_GAME_DIR=/path/to/your/game bash run.sh
 ```

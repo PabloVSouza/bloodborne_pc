@@ -113,7 +113,7 @@ Bloodborne for Apple Silicon ($version)
 No game files are included. Saves, settings and logs:
 ~/Library/Application Support/bloodborne_mac
 
-https://github.com/PabloVSouza/bloodborne_mac
+https://github.com/PabloVSouza/bloodborne-recomp
 EOF
 hdiutil create -quiet -volname "Bloodborne" -srcfolder "$work" -ov -format UDZO "dist/$name.dmg"
 ls -lh "dist/$name.dmg"

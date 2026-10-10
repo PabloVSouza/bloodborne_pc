@@ -22,7 +22,7 @@ update that changes the shader cache format.
 
 1. Open the launcher's **Log** tab, or `~/Library/Application Support/bloodborne_mac/logs/last.log`.
 2. Start the game again. Some known crashes are intermittent (below).
-3. If it keeps happening, [open an issue](https://github.com/PabloVSouza/bloodborne_mac/issues)
+3. If it keeps happening, [open an issue](https://github.com/PabloVSouza/bloodborne-recomp/issues)
    with the log, your Mac model and macOS version.
 
 Please do not report problems with this port to shadPS4 or to the upstream project.

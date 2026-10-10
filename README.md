@@ -1,8 +1,9 @@
-<h1 align="center">bloodborne_mac</h1>
+<h1 align="center">bloodborne-recomp</h1>
 
 <p align="center">
   <strong>Bloodborne, running natively on Apple Silicon.</strong><br>
-  A macOS port of the PS4 game, with a launcher app and an in-game settings menu. No Rosetta 2.
+  A macOS port of the PS4 game, with a launcher app and an in-game settings menu. No Rosetta 2.<br>
+  And a recompiler on its way to turning the game's code, from your own copy, into native code.
 </p>
 
 <p align="center">
@@ -10,13 +11,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/PabloVSouza/bloodborne_mac/releases/latest"><strong>Download</strong></a>
+  <a href="https://github.com/PabloVSouza/bloodborne-recomp/releases/latest"><strong>Download</strong></a>
   ·
   <a href="docs/guide/installation.md">Installation</a>
   ·
   <a href="docs/README.md">Documentation</a>
   ·
-  <a href="https://github.com/PabloVSouza/bloodborne_mac/issues">Report a problem</a>
+  <a href="https://github.com/PabloVSouza/bloodborne-recomp/issues">Report a problem</a>
 </p>
 
 <p align="center">
@@ -52,7 +53,7 @@
 
 ## Getting started
 
-1. [Download the latest release](https://github.com/PabloVSouza/bloodborne_mac/releases/latest)
+1. [Download the latest release](https://github.com/PabloVSouza/bloodborne-recomp/releases/latest)
    and drag **Bloodborne** to Applications.
 2. The first time, right-click the app and choose **Open** (the app is not signed with an Apple
    Developer ID).
@@ -71,7 +72,7 @@ saving. On an Apple M3 Pro it runs at about **44 FPS** at 1080p with FSR 3.1
 copy, into native code, checked against calls recorded from the original. Every one of the game's
 functions is generated and the game runs on them; the work now is speed. Only the tool is
 published, never the game's code ([plan](docs/RECOMPILATION.md),
-[status](https://github.com/PabloVSouza/bloodborne_mac/wiki/Recompilation-status)).
+[status](https://github.com/PabloVSouza/bloodborne-recomp/wiki/Recompilation-status)).
 
 ## Documentation
 
@@ -89,11 +90,11 @@ published, never the game's code ([plan](docs/RECOMPILATION.md),
 
 ## Acknowledgements
 
-bloodborne_mac started as a fork of [**bbport**](https://github.com/deadinside28/bloodborne_pc) by
+This project (formerly the bloodborne_mac repository) started as a fork of [**bbport**](https://github.com/deadinside28/bloodborne_pc) by
 deadinside28, a native Linux port of Bloodborne whose renderer is built on
 [**shadPS4**](https://github.com/shadps4-emu/shadPS4), and it still builds on both: the loader, the
 PS4 runtime, the renderer and its extensions, the upscalers and the patches come from them, and
-bbport's releases are merged here as they come out (now 0.5), its history kept. bloodborne_mac adds
+bbport's releases are merged here as they come out (now 0.5), its history kept. This project adds
 the macOS platform layer, its own x86-64 → arm64 translator, the macOS app and the recompiler. It
 became a separate repository as those grew apart from a Linux port's; none of this would exist
 without the projects it is built on. Full credits: [Credits and licenses](docs/CREDITS.md).
@@ -101,4 +102,4 @@ without the projects it is built on. Full credits: [Credits and licenses](docs/C
 Licensed under the [GNU GPL v2 or later](LICENSE).
 
 <sub>Not affiliated with shadPS4, Sony Interactive Entertainment, FromSoftware or AMD. Please do
-not report problems with bloodborne_mac to shadPS4 or to bbport.</sub>
+not report problems with this project to shadPS4 or to bbport.</sub>

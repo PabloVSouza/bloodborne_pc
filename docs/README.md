@@ -21,7 +21,7 @@
   gained.
 - [Recompilation](RECOMPILATION.md): turning the game's code into native code with a recompiler
   that runs on the player's own copy (in progress,
-  [status](https://github.com/PabloVSouza/bloodborne_mac/wiki/Recompilation-status)).
+  [status](https://github.com/PabloVSouza/bloodborne-recomp/wiki/Recompilation-status)).
 - [Launcher](../launcher/app/README.md): the launcher's stack and code conventions.
 
 ## Project
