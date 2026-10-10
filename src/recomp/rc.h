@@ -102,6 +102,97 @@ static inline void rc_sts(uint64_t address, int size, uint64_t value) {
     memcpy((void *)address, &value, (size_t)size);
 }
 
+/* SZP of a result into flags f (the interpreter's set_szp). */
+static inline uint64_t rc_szp(uint64_t f, uint64_t r, int size) {
+    r &= rc_mask(size);
+    f &= ~(uint64_t)(F_ZF | F_SF | F_PF);
+    if (!r) f |= F_ZF;
+    if (r & (UINT64_C(1) << (size * 8 - 1))) f |= F_SF;
+    if (!__builtin_parity((unsigned)(r & 0xff))) f |= F_PF;
+    return f;
+}
+
+/* Flags after shl/shr/sar of `a` by `count` (masked, non-zero) giving `r` (the interpreter's). */
+static inline uint64_t rc_shift_flags(uint64_t f, int kind, uint64_t a, unsigned count, uint64_t r, int size) {
+    const int bits = size * 8;
+    const uint64_t sign = UINT64_C(1) << (bits - 1);
+    int cf;
+    f &= ~(uint64_t)(F_CF | F_OF);
+    if (kind == 0) { /* shl */
+        cf = count <= (unsigned)bits && ((a >> (bits - count)) & 1);
+        if (((r & sign) != 0) != cf) f |= F_OF;
+    } else if (kind == 1) { /* shr */
+        cf = (int)((a >> (count - 1)) & 1);
+        if (a & sign) f |= F_OF;
+    } else { /* sar: a sign-extended */
+        cf = (int)(((int64_t)a >> (count - 1)) & 1);
+    }
+    if (cf) f |= F_CF;
+    return rc_szp(f, r, size);
+}
+
+/* Vector operands (the interpreter's vread/vwrite): memory loads and stores with x86 ordering;
+ * a register destination gets `bytes`, VEX forms zeros above them. */
+static inline BbVec rc_vld(uint64_t address, int size) {
+    BbVec v;
+    memset(&v, 0, sizeof(v));
+    memcpy(v.b, (const void *)address, (size_t)size);
+    bb_fence_load();
+    return v;
+}
+static inline void rc_vst(uint64_t address, int size, BbVec v) {
+    bb_fence_store();
+    memcpy((void *)address, v.b, (size_t)size);
+}
+static inline void rc_vset(BbVec *d, BbVec v, int bytes, int vex) {
+    memcpy(d->b, v.b, (size_t)bytes);
+    if (vex && bytes < 32) memset(d->b + bytes, 0, (size_t)(32 - bytes));
+}
+static inline BbVec rc_vgpr(uint64_t value) {
+    BbVec v;
+    memset(&v, 0, sizeof(v));
+    v.q[0] = value;
+    return v;
+}
+
+/* cmpps predicates (the interpreter's fcompare). */
+static inline int rc_fcompare(double a, double b, int predicate) {
+    const int unordered = a != a || b != b;
+    int r;
+    switch (predicate & 7) {
+    case 0: r = !unordered && a == b; break;
+    case 1: r = !unordered && a < b; break;
+    case 2: r = !unordered && a <= b; break;
+    case 3: r = unordered; break;
+    case 4: r = unordered || a != b; break;
+    case 5: r = unordered || !(a < b); break;
+    case 6: r = unordered || !(a <= b); break;
+    default: r = !unordered; break;
+    }
+    if (predicate & 8) {
+        switch (predicate & 7) {
+        case 0: r = unordered || a == b; break;
+        case 1: r = unordered || !(a >= b); break;
+        case 2: r = unordered || !(a > b); break;
+        case 3: r = 0; break;
+        case 4: r = !unordered && a != b; break;
+        case 5: r = !unordered && a >= b; break;
+        case 6: r = !unordered && a > b; break;
+        default: r = 1; break;
+        }
+    }
+    return r;
+}
+
+/* comiss/ucomiss flags (the interpreter's comis). */
+static inline uint64_t rc_comis(uint64_t f, double a, double b) {
+    f &= ~(uint64_t)F_ARITH;
+    if (a != a || b != b) f |= F_ZF | F_PF | F_CF;
+    else if (a < b) f |= F_CF;
+    else if (a == b) f |= F_ZF;
+    return f;
+}
+
 #ifdef __cplusplus
 }
 #endif

@@ -210,6 +210,9 @@ static void jump(Range f, uint64_t t) {
     else emit("{ " SPILL " c->rip = B + 0x%" PRIx64 "ull; rc->tail(c); return; }", t);
 }
 
+static int translate_vector(uint64_t off, const BbInsn *in);
+static int translate_shift_mul(uint64_t off, const BbInsn *in);
+
 /* One instruction natively; 0: it goes to the interpreter. */
 static int translate(Range f, uint64_t off, const BbInsn *in, uint64_t *stats) {
     const uint64_t next = off + in->length;
@@ -367,8 +370,299 @@ static int translate(Range f, uint64_t off, const BbInsn *in, uint64_t *stats) {
         return 1;
     }
     default:
+        return translate_shift_mul(off, in) || translate_vector(off, in);
+    }
+}
+
+
+/* ---- vector instructions (as src/cpu/interp_vec.c does them) ---- */
+
+static int vreg(const BbOp *op) { return op->type == OP_REG && op->kind == RK_VEC; }
+static int vwidth(const BbInsn *in) { return in->vex && in->vl ? in->vl : 16; }
+
+/* A vector operand's value (a BbVec expression). */
+static int vread(uint64_t off, const BbInsn *in, const BbOp *op, Str *v) {
+    if (vreg(op)) { *v = str("c->v[%d]", op->reg); return 1; }
+    if (op->type == OP_MEM) {
+        Str a;
+        int stack;
+        if (!address(off, in, op, &a, &stack)) return 0;
+        *v = str("rc_vld(%s, %d)", a.s, op->size);
+        return 1;
+    }
+    if (gpr(op)) {
+        Str g;
+        if (!read_op(off, in, op, 8, &g)) return 0;
+        *v = str("rc_vgpr(%s)", g.s);
+        return 1;
+    }
+    return 0;
+}
+
+/* A statement writing BbVec `v` (`bytes` of it to a register). */
+static int vwrite(uint64_t off, const BbInsn *in, const BbOp *op, const char *v, int bytes, Str *s) {
+    if (vreg(op)) { *s = str("rc_vset(&c->v[%d], %s, %d, %d);", op->reg, v, bytes, in->vex ? 1 : 0); return 1; }
+    if (op->type == OP_MEM) {
+        Str a;
+        int stack;
+        if (!address(off, in, op, &a, &stack)) return 0;
+        *s = str("rc_vst(%s, %d, %s);", a.s, op->size, v);
+        return 1;
+    }
+    return 0;
+}
+
+typedef struct { const BbOp *dst, *s1, *s2, *imm; } VOps;
+static VOps vops3(const BbInsn *in) {
+    VOps o = {&in->op[0], NULL, NULL, NULL};
+    if (in->vex && in->count >= 3 && in->op[2].type != OP_IMM) {
+        o.s1 = &in->op[1]; o.s2 = &in->op[2];
+        if (in->count >= 4 && in->op[3].type == OP_IMM) o.imm = &in->op[3];
+    } else {
+        o.s1 = &in->op[0]; o.s2 = &in->op[1];
+        if (in->count >= 3 && in->op[2].type == OP_IMM) o.imm = &in->op[2];
+    }
+    return o;
+}
+static VOps vops1(const BbInsn *in) {
+    VOps o = {&in->op[0], NULL, NULL, NULL};
+    int last = in->count - 1;
+    if (in->op[last].type == OP_IMM) { o.imm = &in->op[last]; --last; }
+    o.s2 = &in->op[last];
+    o.s1 = &in->op[0];
+    return o;
+}
+
+/* Two sources, a lane loop, the destination: `body` sets rr from a and b (i: the lane). */
+static int vbinary(uint64_t off, const BbInsn *in, int lanes, int bytes, int zero, const char *body) {
+    const VOps o = vops3(in);
+    Str a, b, w;
+    if (!vread(off, in, o.s1, &a) || !vread(off, in, o.s2, &b) || !vwrite(off, in, o.dst, "rr", bytes, &w)) return 0;
+    emit("{ const BbVec a = %s, b = %s; BbVec rr = a; %s for (int i = 0; i < %d; ++i) { %s } %s }\n", a.s, b.s,
+         zero ? "memset(&rr, 0, sizeof(rr));" : "", lanes, body, w.s);
+    return 1;
+}
+
+static int translate_vector(uint64_t off, const BbInsn *in) {
+    const int m = in->mnemonic, w = vwidth(in);
+    Str a, b, s;
+    switch (m) {
+    case M(MOVAPS): case M(MOVUPS): case M(MOVAPD): case M(MOVUPD): case M(MOVDQA): case M(MOVDQU):
+    case M(VMOVAPS): case M(VMOVUPS): case M(VMOVAPD): case M(VMOVUPD): case M(VMOVDQA): case M(VMOVDQU):
+    case M(LDDQU): case M(VLDDQU):
+        if (!vread(off, in, &in->op[1], &a) || !vwrite(off, in, &in->op[0], a.s, in->op[0].size, &s)) return 0;
+        emit("%s\n", s.s);
+        return 1;
+    case M(MOVSS): case M(VMOVSS): case M(MOVSD): case M(VMOVSD): {
+        if (m == M(MOVSD) && !(in->count && vreg(&in->op[0])) && !(in->count >= 2 && vreg(&in->op[1]))) return 0;
+        const int bytes = (m == M(MOVSS) || m == M(VMOVSS)) ? 4 : 8;
+        const BbOp *d = &in->op[0];
+        if (d->type == OP_MEM) {
+            Str ad;
+            int stack;
+            if (!vread(off, in, &in->op[in->count - 1], &a) || !address(off, in, d, &ad, &stack)) return 0;
+            emit("rc_vst(%s, %d, %s);\n", ad.s, bytes, a.s);
+            return 1;
+        }
+        if (!vreg(d)) return 0;
+        if (in->count == 3) {
+            if (!vread(off, in, &in->op[1], &a) || !vread(off, in, &in->op[2], &b)) return 0;
+            emit("{ BbVec rr = %s; const BbVec b = %s; memcpy(rr.b, b.b, %d); rc_vset(&c->v[%d], rr, 16, %d); }\n", a.s, b.s,
+                 bytes, d->reg, in->vex ? 1 : 0);
+            return 1;
+        }
+        const BbOp *src = &in->op[1];
+        if (src->type == OP_MEM) {
+            Str ad;
+            int stack;
+            if (!address(off, in, src, &ad, &stack)) return 0;
+            if (in->vex) emit("rc_vset(&c->v[%d], rc_vld(%s, %d), 16, 1);\n", d->reg, ad.s, bytes);
+            else emit("{ const BbVec rr = rc_vld(%s, %d); memcpy(c->v[%d].b, rr.b, 16); }\n", ad.s, bytes, d->reg);
+            return 1;
+        }
+        if (!vreg(src)) return 0;
+        emit("{ BbVec rr = c->v[%d]; memcpy(rr.b, c->v[%d].b, %d); rc_vset(&c->v[%d], rr, 16, %d); }\n", d->reg,
+             src->reg, bytes, d->reg, in->vex ? 1 : 0);
+        return 1;
+    }
+    case M(ADDPS): case M(VADDPS): case M(SUBPS): case M(VSUBPS): case M(MULPS): case M(VMULPS):
+    case M(DIVPS): case M(VDIVPS): case M(MINPS): case M(VMINPS): case M(MAXPS): case M(VMAXPS):
+    case M(ADDSS): case M(VADDSS): case M(SUBSS): case M(VSUBSS): case M(MULSS): case M(VMULSS):
+    case M(DIVSS): case M(VDIVSS): case M(MINSS): case M(VMINSS): case M(MAXSS): case M(VMAXSS):
+    case M(ADDPD): case M(VADDPD): case M(SUBPD): case M(VSUBPD): case M(MULPD): case M(VMULPD):
+    case M(DIVPD): case M(VDIVPD): case M(ADDSD): case M(VADDSD): case M(SUBSD): case M(VSUBSD):
+    case M(MULSD): case M(VMULSD): case M(DIVSD): case M(VDIVSD): {
+        const char *name = ZydisMnemonicGetString((ZydisMnemonic)m);
+        const char *base = name[0] == 'v' ? name + 1 : name;
+        const int dbl = base[strlen(base) - 1] == 'd', scalar = base[strlen(base) - 2] == 's';
+        const char *f = dbl ? "fd" : "f", *t = dbl ? "double" : "float";
+        const char *op = !strncmp(base, "add", 3) ? "x + y" : !strncmp(base, "sub", 3) ? "x - y"
+                       : !strncmp(base, "mul", 3) ? "x * y" : !strncmp(base, "div", 3) ? "x / y"
+                       : !strncmp(base, "min", 3) ? "x < y ? x : y" : "x > y ? x : y";
+        const Str body = str("const %s x = a.%s[i], y = b.%s[i]; rr.%s[i] = %s;", t, f, f, f, op);
+        return vbinary(off, in, scalar ? 1 : w / (dbl ? 8 : 4), scalar ? 16 : w, 0, body.s);
+    }
+    case M(ANDPS): case M(VANDPS): case M(ANDPD): case M(VANDPD): case M(PAND): case M(VPAND):
+        return vbinary(off, in, 4, w, 0, "rr.q[i] = a.q[i] & b.q[i];");
+    case M(ANDNPS): case M(VANDNPS): case M(ANDNPD): case M(VANDNPD): case M(PANDN): case M(VPANDN):
+        return vbinary(off, in, 4, w, 0, "rr.q[i] = ~a.q[i] & b.q[i];");
+    case M(ORPS): case M(VORPS): case M(ORPD): case M(VORPD): case M(POR): case M(VPOR):
+        return vbinary(off, in, 4, w, 0, "rr.q[i] = a.q[i] | b.q[i];");
+    case M(XORPS): case M(VXORPS): case M(XORPD): case M(VXORPD): case M(PXOR): case M(VPXOR):
+        return vbinary(off, in, 4, w, 0, "rr.q[i] = a.q[i] ^ b.q[i];");
+    case M(PADDD): case M(VPADDD): return vbinary(off, in, w / 4, w, 1, "rr.d[i] = a.d[i] + b.d[i];");
+    case M(PSUBD): case M(VPSUBD): return vbinary(off, in, w / 4, w, 1, "rr.d[i] = a.d[i] - b.d[i];");
+    case M(PADDQ): case M(VPADDQ): return vbinary(off, in, w / 8, w, 1, "rr.q[i] = a.q[i] + b.q[i];");
+    case M(PSUBQ): case M(VPSUBQ): return vbinary(off, in, w / 8, w, 1, "rr.q[i] = a.q[i] - b.q[i];");
+    case M(PCMPEQB): case M(VPCMPEQB): return vbinary(off, in, w, w, 1, "rr.b[i] = a.b[i] == b.b[i] ? 0xff : 0;");
+    case M(PCMPEQD): case M(VPCMPEQD): return vbinary(off, in, w / 4, w, 1, "rr.d[i] = a.d[i] == b.d[i] ? ~0u : 0;");
+    case M(PCMPEQQ): case M(VPCMPEQQ): return vbinary(off, in, w / 8, w, 1, "rr.q[i] = a.q[i] == b.q[i] ? ~0ull : 0;");
+    case M(HADDPS): case M(VHADDPS): case M(HSUBPS): case M(VHSUBPS): {
+        const char *op = (m == M(HADDPS) || m == M(VHADDPS)) ? "+" : "-";
+        const Str body = str("const float *x = a.f + i * 4, *y = b.f + i * 4; rr.f[i * 4] = x[0] %s x[1]; "
+                             "rr.f[i * 4 + 1] = x[2] %s x[3]; rr.f[i * 4 + 2] = y[0] %s y[1]; rr.f[i * 4 + 3] = y[2] %s y[3];",
+                             op, op, op, op);
+        return vbinary(off, in, w / 16, w, 1, body.s);
+    }
+    case M(CMPPS): case M(VCMPPS): case M(CMPPD): case M(VCMPPD): case M(CMPSS): case M(VCMPSS): case M(CMPSD): case M(VCMPSD): {
+        const VOps o = vops3(in);
+        if (!o.imm) return 0;
+        const int predicate = (int)o.imm->disp & 31;
+        const int dbl = m == M(CMPPD) || m == M(VCMPPD) || m == M(CMPSD) || m == M(VCMPSD);
+        const int scalar = m == M(CMPSS) || m == M(VCMPSS) || m == M(CMPSD) || m == M(VCMPSD);
+        const Str body = dbl ? str("rr.q[i] = rc_fcompare(a.fd[i], b.fd[i], %d) ? ~0ull : 0;", predicate)
+                             : str("rr.d[i] = rc_fcompare(a.f[i], b.f[i], %d) ? ~0u : 0;", predicate);
+        return vbinary(off, in, scalar ? 1 : w / (dbl ? 8 : 4), scalar ? 16 : w, 0, body.s);
+    }
+    case M(COMISS): case M(VCOMISS): case M(UCOMISS): case M(VUCOMISS): case M(COMISD): case M(VCOMISD):
+    case M(UCOMISD): case M(VUCOMISD): {
+        const int dbl = m == M(COMISD) || m == M(VCOMISD) || m == M(UCOMISD) || m == M(VUCOMISD);
+        if (!vread(off, in, &in->op[0], &a) || !vread(off, in, &in->op[1], &b)) return 0;
+        emit("{ const BbVec a = %s, b = %s; c->flags = rc_comis(c->flags, a.%s[0], b.%s[0]); fk = FK_CPU; }\n", a.s, b.s,
+             dbl ? "fd" : "f", dbl ? "fd" : "f");
+        return 1;
+    }
+    case M(SHUFPS): case M(VSHUFPS): {
+        const VOps o = vops3(in);
+        if (!o.imm) return 0;
+        const int imm = (int)o.imm->disp;
+        const Str body = str("rr.d[i * 4] = a.d[i * 4 + %d]; rr.d[i * 4 + 1] = a.d[i * 4 + %d]; rr.d[i * 4 + 2] = b.d[i * 4 + %d]; "
+                             "rr.d[i * 4 + 3] = b.d[i * 4 + %d];", imm & 3, (imm >> 2) & 3, (imm >> 4) & 3, (imm >> 6) & 3);
+        return vbinary(off, in, w / 16, w, 1, body.s);
+    }
+    case M(PSHUFD): case M(VPSHUFD): case M(VPERMILPS): {
+        if (m == M(VPERMILPS) && in->op[2].type != OP_IMM) return 0;
+        const VOps o = vops1(in);
+        if (!o.imm || !vread(off, in, o.s2, &a) || !vwrite(off, in, o.dst, "rr", w, &s)) return 0;
+        const int imm = (int)o.imm->disp;
+        emit("{ const BbVec a = %s; BbVec rr = a; for (int h = 0; h < %d; ++h) { rr.d[h * 4] = a.d[h * 4 + %d]; "
+             "rr.d[h * 4 + 1] = a.d[h * 4 + %d]; rr.d[h * 4 + 2] = a.d[h * 4 + %d]; rr.d[h * 4 + 3] = a.d[h * 4 + %d]; } %s }\n",
+             a.s, w / 16, imm & 3, (imm >> 2) & 3, (imm >> 4) & 3, (imm >> 6) & 3, s.s);
+        return 1;
+    }
+    case M(MOVMSKPS): case M(VMOVMSKPS): {
+        if (!vread(off, in, &in->op[1], &a)) return 0;
+        Str wr;
+        if (!write_op(off, in, &in->op[0], "mask", &wr)) return 0;
+        emit("{ const BbVec a = %s; uint64_t mask = 0; for (int i = 0; i < %d; ++i) mask |= (uint64_t)(a.d[i] >> 31) << i; %s }\n",
+             a.s, w / 4, wr.s);
+        return 1;
+    }
+    case M(MOVHLPS): case M(VMOVHLPS): case M(MOVLHPS): case M(VMOVLHPS): {
+        const VOps o = vops3(in);
+        if (!vread(off, in, o.s1, &a) || !vread(off, in, o.s2, &b) || !vwrite(off, in, o.dst, "rr", 16, &s)) return 0;
+        emit("{ BbVec rr = %s; const BbVec b = %s; %s %s }\n", a.s, b.s,
+             (m == M(MOVHLPS) || m == M(VMOVHLPS)) ? "rr.q[0] = b.q[1];" : "rr.q[1] = b.q[0];", s.s);
+        return 1;
+    }
+    case M(MOVD): case M(VMOVD): case M(MOVQ): case M(VMOVQ): {
+        const BbOp *d = &in->op[0], *src = &in->op[1];
+        const int bytes = (m == M(MOVD) || m == M(VMOVD)) ? 4 : 8;
+        if (!vread(off, in, src, &a)) return 0;
+        if (vreg(d)) {
+            emit("{ BbVec rr; memset(&rr, 0, sizeof(rr)); const BbVec s = %s; memcpy(rr.b, s.b, %d); memcpy(c->v[%d].b, rr.b, 16);%s }\n",
+                 a.s, bytes, d->reg, in->vex ? str(" memset(c->v[%d].b + 16, 0, 16);", d->reg).s : "");
+            return 1;
+        }
+        if (d->type == OP_MEM) {
+            Str ad;
+            int stack;
+            if (!address(off, in, d, &ad, &stack)) return 0;
+            emit("rc_vst(%s, %d, %s);\n", ad.s, bytes, a.s);
+            return 1;
+        }
+        Str wr;
+        if (!write_op(off, in, d, bytes == 4 ? "s.d[0]" : "s.q[0]", &wr)) return 0;
+        emit("{ const BbVec s = %s; %s }\n", a.s, wr.s);
+        return 1;
+    }
+    default:
         return 0;
     }
+}
+
+/* shl/shr/sar by a constant; imul with two or three operands. */
+static int translate_shift_mul(uint64_t off, const BbInsn *in) {
+    const int m = in->mnemonic;
+    const BbOp *d = &in->op[0];
+    const int size = d->size;
+    if (size != 4 && size != 8 && size != 2 && size != 1) return 0;
+    static const char *const sext[9] = {0, "int8_t", "int16_t", 0, "int32_t", 0, 0, 0, "int64_t"};
+    Str a, w;
+    if (m == M(SHL) || m == M(SHR) || m == M(SAR)) {
+        unsigned count = 1;
+        if (in->count > 1) {
+            if (in->op[1].type != OP_IMM) return 0; /* by cl */
+            count = (unsigned)in->op[1].disp;
+        }
+        count &= size == 8 ? 63 : 31;
+        if (!count) { emit("/* shift by 0 */\n"); return 1; }
+        const int bits = size * 8;
+        Str da;
+        int stack = 0;
+        emit("{ ");
+        if (d->type == OP_MEM) {
+            if (!address(off, in, d, &da, &stack)) return 0;
+            emit("const uint64_t ea = %s; const uint64_t a = %s(ea, %d); ", da.s, stack ? "rc_lds" : "rc_ld", size);
+        } else if (gpr(d)) {
+            if (!read_op(off, in, d, size, &a)) return 0;
+            emit("const uint64_t a = %s; ", a.s);
+        } else {
+            return 0;
+        }
+        if (m == M(SHL)) emit("const uint64_t v = %s; ", count >= (unsigned)bits ? "0" : str("(a << %u) & 0x%" PRIx64 "ull", count, mask(size)).s);
+        else if (m == M(SHR)) emit("const uint64_t v = %s; ", count >= (unsigned)bits ? "0" : str("a >> %u", count).s);
+        else emit("const uint64_t v = (uint64_t)((int64_t)(%s)a >> %u) & 0x%" PRIx64 "ull; ", sext[size],
+                  count >= (unsigned)bits ? (unsigned)bits - 1 : count, mask(size));
+        emit("c->flags = rc_shift_flags(rc_flags(fk, fa, fb, fr, fz, fcf, c->flags), %d, %s, %u, v, %d); fk = FK_CPU; ",
+             m == M(SHL) ? 0 : m == M(SHR) ? 1 : 2, m == M(SAR) ? str("(uint64_t)(int64_t)(%s)a", sext[size]).s : "a", count, size);
+        if (d->type == OP_MEM) emit("%s(ea, %d, v);", stack ? "rc_sts" : "rc_st", size);
+        else {
+            if (!write_op(off, in, d, "v", &w)) return 0;
+            emit("%s", w.s);
+        }
+        emit(" }\n");
+        return 1;
+    }
+    if (m == M(IMUL) && in->count >= 2 && gpr(d) && size >= 2) {
+        Str x, y;
+        if (!read_op(off, in, in->count == 3 ? &in->op[1] : d, size, &x)) return 0;
+        if (in->count == 3) {
+            if (in->op[2].type != OP_IMM) return 0;
+            y = str("(int64_t)%" PRId64 "ll", in->op[2].disp);
+        } else {
+            Str t;
+            if (!read_op(off, in, &in->op[1], size, &t)) return 0;
+            y = str("(int64_t)(%s)(%s)", sext[size], t.s);
+        }
+        if (!write_op(off, in, d, "v", &w)) return 0;
+        emit("{ const __int128 full = (__int128)(int64_t)(%s)(%s) * %s; const uint64_t v = (uint64_t)full & 0x%" PRIx64 "ull; "
+             "const int ov = (__int128)(int64_t)(%s)v != full; "
+             "c->flags = rc_szp((rc_flags(fk, fa, fb, fr, fz, fcf, c->flags) & ~(uint64_t)(F_CF | F_OF)) | (ov ? F_CF | F_OF : 0), v, %d); "
+             "fk = FK_CPU; %s }\n", sext[size], x.s, y.s, mask(size), sext[size], size, w.s);
+        return 1;
+    }
+    return 0;
 }
 
 /* Decodes [start, start + size) linearly; returns the instructions (and their offsets). */

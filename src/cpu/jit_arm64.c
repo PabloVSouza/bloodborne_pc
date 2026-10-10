@@ -37,7 +37,7 @@ enum { T0 = 0, T1 = 1, T2 = 2, T3 = 3, T4 = 4, T5 = 5, TA = 16, TB = 17, FL = 8,
 
 enum { CODE_SIZE = 128 << 20 };
 static uint32_t *code_base, *code_end, *code_next;
-static uint32_t *enter_stub, *exit_stub, *fallback_stub, *native_stub;
+static uint32_t *enter_stub, *exit_stub, *fallback_stub, *native_stub, *recomp_stub;
 static pthread_mutex_t jit_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t translated_blocks, fallback_insns;
 /* Translated blocks in code order (the buffer only grows), for fault reports. */
@@ -111,6 +111,15 @@ static void jit_fallback(BbCpu *cpu, const BbInsn *in) {
 static void jit_native(BbCpu *cpu, const void *fn) {
     jit_to_x86(cpu);
     bbcpu_call_native(cpu, fn);
+    x86_to_jit(cpu);
+}
+
+/* Called from translated code for a direct call of a recompiled function (recomp.c): its return
+ * address is pushed; it returns with cpu->rip at it. */
+static void jit_recomp(BbCpu *cpu, RcFn fn) {
+    jit_to_x86(cpu);
+    __atomic_add_fetch(&bbcpu_recomp_calls, 1, __ATOMIC_RELAXED);
+    fn(cpu);
     x86_to_jit(cpu);
 }
 
@@ -192,6 +201,18 @@ static int jit_init(void) {
             a64_mov(&a, 1, 0, CPU);
             a64_mov(&a, 1, 1, TB);
             a64_mov_imm(&a, TA, (uint64_t)(uintptr_t)&jit_native);
+            a64_blr(&a, TA);
+            a64_ldp_post(&a, 29, 30, SP, 16);
+            sync_in(&a);
+            a64_ret(&a);
+            /* recomp: TA = the function's guest address, TB = the recompiled function (jit_recomp). */
+            recomp_stub = a64_here(&a);
+            sync_out(&a);
+            a64_str_uoff(&a, 3, TA, CPU, OFF(rip));
+            a64_stp_pre(&a, 29, 30, SP, -16);
+            a64_mov(&a, 1, 0, CPU);
+            a64_mov(&a, 1, 1, TB);
+            a64_mov_imm(&a, TA, (uint64_t)(uintptr_t)&jit_recomp);
             a64_blr(&a, TA);
             a64_ldp_post(&a, 29, 30, SP, 16);
             sync_in(&a);
@@ -2052,6 +2073,20 @@ static int translate_insn(Tx *t, const BbInsn *in, int flags_live, int *handled)
                 a64_mov_imm(a, TA, t->rip);
                 a64_mov_imm(a, TB, (uint64_t)(uintptr_t)fn);
                 a64_bl(a, (int32_t)(native_stub - a64_here(a)));
+                exit_to(t, next);
+                return 1;
+            }
+        }
+        /* A recompiled function (recomp.c): its return address pushed, then called from here. */
+        if (op->type == OP_IMM && bbcpu_recomp_count) {
+            const uint64_t callee = t->rip + (uint64_t)op->disp;
+            const RcFn fn = bbcpu_recomp_at(callee);
+            if (fn && !(bbcpu_record_armed && bbcpu_record_target(callee))) {
+                a64_mov_imm(a, T0, next);
+                push_reg(t, T0);
+                a64_mov_imm(a, TA, callee);
+                a64_mov_imm(a, TB, (uint64_t)(uintptr_t)fn);
+                a64_bl(a, (int32_t)(recomp_stub - a64_here(a)));
                 exit_to(t, next);
                 return 1;
             }
