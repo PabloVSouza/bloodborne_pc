@@ -65,6 +65,7 @@ The goal is a native port: the engine's graphics drawing with Metal directly. Pr
 
 Almost everything that makes the game run (the loader, the PS4 runtime, the renderer and its
 extensions, the upscalers and the patches) comes from
-[bbport](https://github.com/deadinside28/bloodborne_pc) and shadPS4. This fork adds the macOS
-platform layer, the arm64 translator and the macOS app. Upstream's README is kept in
+[bbport](https://github.com/deadinside28/bloodborne_pc), the Linux port this project started from as
+a fork, and shadPS4. bloodborne_mac adds the macOS platform layer, the arm64 translator, the macOS
+app and the recompiler. Upstream's README is kept in
 [upstream/README.md](../upstream/README.md).

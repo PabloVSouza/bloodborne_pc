@@ -7,9 +7,12 @@ project it is based on.
 
 ## Based on
 
-- [**deadinside28/bloodborne_pc**](https://github.com/deadinside28/bloodborne_pc) (bbport): the
-  native Linux port this project is a fork of, merged up to **0.5**. It provides the loader, the
-  PS4 runtime, the renderer extensions, the upscalers and the original launcher.
+- [**deadinside28/bloodborne_pc**](https://github.com/deadinside28/bloodborne_pc) (bbport) by
+  deadinside28: the native Linux port this project started from as a fork, and a separate
+  repository since October 2026. Its releases are merged here as they come out (now **0.5**), with
+  their history; the merge commits name each one. It provides the loader, the PS4 runtime, the
+  renderer extensions, the upscalers, the game-specific fixes and the original launcher. Code
+  taken from it keeps its authorship in the git history.
 - [**shadPS4**](https://github.com/shadps4-emu/shadPS4): the video core and shader recompiler
   (GPL-2.0+), and [sirit](https://github.com/shadps4-emu/sirit).
 

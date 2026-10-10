@@ -6,6 +6,10 @@
 </p>
 
 <p align="center">
+  <sub>Built on <a href="https://github.com/deadinside28/bloodborne_pc"><strong>bbport</strong></a> by deadinside28, the native Linux port it started from, and on <a href="https://github.com/shadps4-emu/shadPS4">shadPS4</a>.</sub>
+</p>
+
+<p align="center">
   <a href="https://github.com/PabloVSouza/bloodborne_mac/releases/latest"><strong>Download</strong></a>
   ·
   <a href="docs/guide/installation.md">Installation</a>
@@ -85,13 +89,16 @@ published, never the game's code ([plan](docs/RECOMPILATION.md),
 
 ## Acknowledgements
 
-This project is a fork of [**bbport**](https://github.com/deadinside28/bloodborne_pc), a native
-Linux port of Bloodborne, whose renderer is built on [**shadPS4**](https://github.com/shadps4-emu/shadPS4).
-Almost everything that makes the game run comes from those projects. This fork adds the macOS
-platform layer, an x86-64 → arm64 translator and the macOS app. Full credits:
-[Credits and licenses](docs/CREDITS.md).
+bloodborne_mac started as a fork of [**bbport**](https://github.com/deadinside28/bloodborne_pc) by
+deadinside28, a native Linux port of Bloodborne whose renderer is built on
+[**shadPS4**](https://github.com/shadps4-emu/shadPS4), and it still builds on both: the loader, the
+PS4 runtime, the renderer and its extensions, the upscalers and the patches come from them, and
+bbport's releases are merged here as they come out (now 0.5), its history kept. bloodborne_mac adds
+the macOS platform layer, its own x86-64 → arm64 translator, the macOS app and the recompiler. It
+became a separate repository as those grew apart from a Linux port's; none of this would exist
+without the projects it is built on. Full credits: [Credits and licenses](docs/CREDITS.md).
 
 Licensed under the [GNU GPL v2 or later](LICENSE).
 
 <sub>Not affiliated with shadPS4, Sony Interactive Entertainment, FromSoftware or AMD. Please do
-not report problems with this fork to shadPS4 or to the upstream project.</sub>
+not report problems with bloodborne_mac to shadPS4 or to bbport.</sub>
