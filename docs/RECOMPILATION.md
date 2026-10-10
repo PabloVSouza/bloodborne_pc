@@ -43,8 +43,8 @@ The recompiled code is produced on the player's machine from their copy, and sta
 |---|---|---|
 | R0 | Groundwork: function table, library labels, CPU profile, record and replay, native functions loaded into the game and called from translated code | Done |
 | R1 | Recompiler prototype: generated C for the recorded functions, checked by replay | Done |
-| R2 | Coverage: every function generated; the game runs recompiled, the translator as fallback | In progress |
-| R3 | Speed: integer, flags and vector instructions in C; memory ordering relaxed where safe | |
+| R2 | Coverage: every function generated; the game runs recompiled, the translator as fallback | Done |
+| R3 | Speed: integer, flags and vector instructions in C; memory ordering relaxed where safe | In progress |
 | R4 | Annotations: names, signatures and structs make the generated C readable | |
 | R5 | The engine's graphics on Metal, at the libGnm boundary | |
 
@@ -54,15 +54,17 @@ The recompiled code is produced on the player's machine from their copy, and sta
 
 | | Progress | |
 |---|---|---|
-| Functions recompiled, running in the game | `████░░░░░░░░░░░░░░░░` 20.3% | 49,071 of 241,821 |
-| Instructions recompiled | `█████░░░░░░░░░░░░░░░` 27.2% | 3,063,245 of 11,268,132 |
-| Instructions in plain C (of those recompiled) | `████████████████████` 99.8% | 3,057,104 of 3,063,245 |
+| Functions recompiled, running in the game | `████████████████████` 99.7% | 240,995 of 241,821 |
+| Instructions recompiled | `███████████████████░` 93.0% | 10,484,493 of 11,268,132 |
+| Instructions in plain C (of those recompiled) | `████████████████████` 98.8% | 10,353,766 of 10,484,493 |
+| Speed recompiled, against the translator | `██████████████████░░` 92% | 55.2 FPS against ~60 |
 | Functions checked call by call (recordings) | `░░░░░░░░░░░░░░░░░░░░` 0.4% | 933 of 241,821 |
 | Functions labelled by library | `█████████░░░░░░░░░░░` 44.1% | 106,659 of 241,821 |
 
-The recompiled functions are all those a 3-minute route through the Hunter's Dream runs; the rest
-are generated the same way once a route reaches them, or all at once. Every recompiled function
-runs in the game; the call-by-call checks cover the busiest, and the fuzzing covers every
+Every function is generated; the ones left to the translator are the 660 import stubs, the 130
+functions that call `setjmp`, and 36 the game's patches changed. Instructions recompiled count
+what control flow reaches; the rest is padding and code nothing reaches. Every recompiled function
+can run in the game; the call-by-call checks cover the busiest, and the fuzzing covers every
 instruction form the generator handles.
 
 ## The recompiler
@@ -135,6 +137,15 @@ translator's speed, 59.1 FPS, about 12 million recompiled calls a second. On the
   40 functions that call `setjmp` stay with the translator.
 - Every call the runtime ran in the translator returned to the same address: after a `longjmp` the
   innermost one stopped where an outer one should have.
+
+R2 done (2026-10-10): every function generated, 241,031 (the 660 import stubs and the 130 that
+call `setjmp` stay with the translator), 10.48 million instructions, 98.8% in C; the whole game
+builds in 11.5 minutes into a 404 MB library. 240,995 functions run recompiled in the game (36 the
+game's patches changed stay with the translator) at 55.2 FPS against ~60 with the translator
+alone. Calls of imports the runtime provides go from recompiled code straight to them (2.4 million
+a second); the runtime now provides `strcmp`, `ldiv`, `powf` and `modff` too, which were the
+busiest calls left in the PS4 libc's own code. 1.45 million calls a second still enter the
+translator: what is left for R3, with the hot code spread through the large library.
 
 ## Tools
 

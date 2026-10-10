@@ -64,7 +64,8 @@ saving. On an Apple M3 Pro it runs at about **44 FPS** at 1080p with FSR 3.1
 [known issues](docs/guide/troubleshooting.md#known-issues).
 
 **In progress: recompilation.** A recompiler that turns the game's code, from the player's own
-copy, into native code, checked against calls recorded from the original. Only the tool is
+copy, into native code, checked against calls recorded from the original. Every one of the game's
+functions is generated and the game runs on them; the work now is speed. Only the tool is
 published, never the game's code ([plan](docs/RECOMPILATION.md),
 [status](https://github.com/PabloVSouza/bloodborne_mac/wiki/Recompilation-status)).
 
