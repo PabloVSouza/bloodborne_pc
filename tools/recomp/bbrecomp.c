@@ -667,23 +667,52 @@ static int translate_shift_mul(uint64_t off, const BbInsn *in) {
     return 0;
 }
 
-/* Decodes [start, start + size) linearly; returns the instructions (and their offsets). */
+/* The instructions of [start, start + size) the code reaches from the entry: fall-through, direct
+ * jumps and branches inside the function (data between them, such as jump tables, is never decoded;
+ * a place only an indirect jump reaches goes back to the translator). Sorted by offset. */
 typedef struct { uint64_t off; BbInsn in; } Insn;
+static int insn_order(const void *a, const void *b) {
+    const uint64_t x = ((const Insn *)a)->off, y = ((const Insn *)b)->off;
+    return x < y ? -1 : x > y;
+}
 static Insn *decode(Function fn, size_t *count) {
     Insn *list = NULL;
     size_t n = 0, capacity = 0;
-    for (uint64_t off = fn.offset; off < fn.offset + fn.size;) {
-        const BbBlock *block = bbcpu_block(base + off);
-        if (!block->count) break;
-        for (uint32_t i = 0; i < block->count && off < fn.offset + fn.size; ++i) {
-            if (n == capacity) {
-                capacity = capacity ? capacity * 2 : 256;
-                list = realloc(list, capacity * sizeof(*list));
+    uint8_t *seen = calloc(fn.size + 16, 1);
+    uint64_t *work = malloc((fn.size + 16) * sizeof(*work));
+    size_t pending = 0;
+    work[pending++] = fn.offset;
+    while (pending) {
+        uint64_t off = work[--pending];
+        while (off >= fn.offset && off < fn.offset + fn.size && !seen[off - fn.offset]) {
+            const BbBlock *block = bbcpu_block(base + off);
+            if (!block->count) break;
+            int ended = 0;
+            for (uint32_t i = 0; i < block->count && !ended; ++i) {
+                if (off >= fn.offset + fn.size || seen[off - fn.offset]) { ended = 1; break; }
+                const BbInsn *in = &block->insn[i];
+                seen[off - fn.offset] = 1;
+                if (n == capacity) {
+                    capacity = capacity ? capacity * 2 : 256;
+                    list = realloc(list, capacity * sizeof(*list));
+                }
+                list[n++] = (Insn){off, *in};
+                const int m = in->mnemonic, cc = cc_of(m);
+                if (((cc >= 0 && cc < 16) || m == M(JMP) || m == M(JRCXZ) || m == M(JECXZ) || m == M(LOOP) ||
+                     m == M(LOOPE) || m == M(LOOPNE)) && in->op[0].type == OP_IMM) {
+                    const uint64_t t = off + (uint64_t)in->op[0].disp;
+                    if (t >= fn.offset && t < fn.offset + fn.size && !seen[t - fn.offset]) work[pending++] = t;
+                }
+                /* No fall-through after these. */
+                if (m == M(JMP) || m == M(RET) || m == M(INVALID) || m == M(UD2) || m == M(HLT)) ended = 2;
+                off += in->length;
             }
-            list[n++] = (Insn){off, block->insn[i]};
-            off += block->insn[i].length;
+            if (ended == 2) break;
         }
     }
+    free(work);
+    free(seen);
+    qsort(list, n, sizeof(*list), insn_order);
     *count = n;
     return list;
 }
@@ -849,7 +878,7 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < function_count; ++i)
         emit("    {0x%" PRIx64 ", %" PRIu64 ", 0x%" PRIx64 "ull, f_%" PRIx64 "},\n", functions[i].offset,
              functions[i].size, bbcpu_recomp_hash(base + functions[i].offset, functions[i].size), functions[i].offset);
-    emit("};\n\nconst RcFunction *bb_recomp_init(const RcApi *api, size_t *count) {\n");
+    emit("};\n\n__attribute__((visibility(\"default\"))) const RcFunction *bb_recomp_init(const RcApi *api, size_t *count) {\n");
     emit("    rc = api;\n    *count = sizeof(table) / sizeof(table[0]);\n    return table;\n}\n");
     fclose(out);
     printf("%zu functions, %" PRIu64 " instructions: %" PRIu64 " in C (%.0f%%), the rest in the interpreter; %d files\n",
