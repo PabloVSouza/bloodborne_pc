@@ -14,11 +14,21 @@ clang -arch arm64 -O1 -g -std=gnu11 -Wall -I$D/include tools/recomp/bbrecomp.c s
     src/cpu/decode.c src/cpu/interp.c src/cpu/interp_vec.c src/cpu/interp_x87.c src/cpu/jit_arm64.c \
     src/cpu/record.c src/cpu/native.c src/cpu/recomp.c src/cpu/hostcall.S $D/lib/libZydis.a \
     $D/lib/libZycore.a -o out/recomp/bbrecomp
-rm -f "$G"/recomp*.c "$G"/recomp*.o
-BB_JIT=0 out/recomp/bbrecomp out/eboot.elf out/recomp/functions.tsv "$G/recomp.c" "${offsets[@]}"
+# Generated into $G/new; only files whose C changed are compiled again (OPT: clang's -O level).
+rm -rf out/recomp/gen/new; mkdir -p "$G/new"
+BB_JIT=0 out/recomp/bbrecomp out/eboot.elf out/recomp/functions.tsv "$G/new/recomp.c" "${offsets[@]}"
+for f in "$G"/recomp*.c; do [[ -e $f ]] && [[ ! -e $G/new/$(basename "$f") ]] && rm -f "$f" "$f.o"; done
+changed=()
+for f in "$G"/new/recomp*.c; do
+    old=$G/$(basename "$f")
+    if cmp -s "$f" "$old" && [[ -e $old.o && $old.o -nt $old ]]; then continue; fi
+    mv "$f" "$old"; changed+=("$old")
+done
+echo "${#changed[@]} files to compile"
 # Floating point as on x86: no fused multiply-add.
-ls "$G"/recomp*.c | xargs -P "$(sysctl -n hw.ncpu)" -I{} clang -arch arm64 -O2 -g -std=gnu11 -Wall \
-    -Wno-unused-label -Wno-unused-variable -ffp-contract=off -fno-strict-aliasing -fvisibility=hidden \
-    -I$D/include -Isrc -c {} -o {}.o
+printf '%s\n' "${changed[@]}" | grep . | xargs -P "$(sysctl -n hw.ncpu)" -I{} clang -arch arm64 -O${OPT:-2} -g -std=gnu11 \
+    -Wall -Wno-unused-label -Wno-unused-variable -ffp-contract=off -fno-strict-aliasing -fvisibility=hidden \
+    -I$D/include -Isrc -c {} -o {}.o || true
+for f in "${changed[@]}"; do [[ -e $f.o && $f.o -nt $f ]] || { echo "failed: $f"; exit 1; }; done
 clang -arch arm64 -dynamiclib "$G"/recomp*.o -o out/recomp/librecomp.dylib
 echo "out/recomp/librecomp.dylib"

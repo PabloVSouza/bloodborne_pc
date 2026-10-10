@@ -1,6 +1,10 @@
-/* tools/recomp/scan.c ELF OUTDIR: the game's function table for the decompilation (docs/RECOMPILATION.md).
+/* tools/recomp/scan.c ELF OUTDIR [POINTERS]: the game's function table for the recompiler (docs/RECOMPILATION.md).
  * Functions come from the unwind tables (PT_GNU_EH_FRAME: every function the compiler emitted
- * unwind information for, with its exact start and size). Each one is decoded with Zydis:
+ * unwind information for, with its exact start and size), then from what reaches code outside
+ * them: direct calls, jumps, lea of a code address, and POINTERS (tools/recomp/pointers.py: the
+ * code addresses relocations put into data, vtables). Leaf functions often have no unwind entry;
+ * those are decoded by following their control flow, up to the next known function. Each one is
+ * decoded with Zydis:
  *   OUTDIR/functions.tsv  address, size, instructions, undecodable bytes
  *   OUTDIR/calls.tsv      caller, callee (direct calls, and jumps to another function's start)
  *   OUTDIR/slots.tsv      caller, slot (calls and jumps through a RIP-relative pointer: imports)
@@ -63,9 +67,165 @@ static void write_string(FILE *f, const unsigned char *s, size_t n) {
     }
 }
 
+/* ---- functions the unwind tables do not list ---- */
+
+static uint64_t code_lo, code_hi; /* the executable segment */
+
+/* The function containing `va` (start <= va < start + size), or NULL. */
+static const Function *containing(const Function *f, uint32_t n, uint64_t va) {
+    uint32_t lo = 0, hi = n;
+    while (lo < hi) {
+        const uint32_t mid = (lo + hi) / 2;
+        if (f[mid].start <= va) lo = mid + 1; else hi = mid;
+    }
+    if (!lo) return NULL;
+    const Function *c = &f[lo - 1];
+    return va < c->start + (c->size ? c->size : 1) ? c : NULL;
+}
+
+/* The first function starting after `va`, or code_hi. */
+static uint64_t next_start(const Function *f, uint32_t n, uint64_t va) {
+    uint32_t lo = 0, hi = n;
+    while (lo < hi) {
+        const uint32_t mid = (lo + hi) / 2;
+        if (f[mid].start <= va) lo = mid + 1; else hi = mid;
+    }
+    return lo < n ? f[lo].start : code_hi;
+}
+
+typedef struct { uint64_t *v; size_t n, cap; } List;
+static void push(List *l, uint64_t x) {
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 1024; l->v = realloc(l->v, l->cap * sizeof(*l->v)); }
+    l->v[l->n++] = x;
+}
+static int by_u64(const void *a, const void *b) {
+    const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* Code addresses an instruction refers to: call/jmp targets, lea of code. */
+static void references(const ZydisDecodedInstruction *ins, const ZydisDecodedOperand *ops, uint64_t next, List *out) {
+    for (int o = 0; o < ins->operand_count_visible; ++o) {
+        const ZydisDecodedOperand *op = &ops[o];
+        uint64_t t;
+        if ((ins->mnemonic == ZYDIS_MNEMONIC_CALL || ins->mnemonic == ZYDIS_MNEMONIC_JMP) &&
+            op->type == ZYDIS_OPERAND_TYPE_IMMEDIATE && op->imm.is_relative)
+            t = next + op->imm.value.s;
+        else if (ins->mnemonic == ZYDIS_MNEMONIC_LEA && op->type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                 op->mem.base == ZYDIS_REGISTER_RIP && op->mem.index == ZYDIS_REGISTER_NONE)
+            t = next + op->mem.disp.value;
+        else
+            continue;
+        if (t >= code_lo && t < code_hi) push(out, t);
+    }
+}
+
+/* The extent of a function without unwind information: its instructions reached from `start`
+ * (branches followed, not past `limit`); 0 if its first instruction does not decode. */
+static uint64_t follow(ZydisDecoder *dec, uint64_t start, uint64_t limit, List *refs) {
+    List work = {0};
+    push(&work, start);
+    uint64_t end = start;
+    static uint8_t *seen;
+    static uint64_t seen_size;
+    if (seen_size < code_hi) { free(seen); seen = calloc(code_hi, 1); seen_size = code_hi; }
+    List touched = {0};
+    while (work.n) {
+        uint64_t pc = work.v[--work.n];
+        for (;;) {
+            if (pc < start || pc >= limit || seen[pc]) break;
+            const unsigned char *code = at(pc, 1);
+            if (!code) break;
+            ZydisDecodedInstruction ins;
+            ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
+            const uint64_t avail = limit - pc < 15 ? limit - pc : 15;
+            if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(dec, code, avail, &ins, ops))) {
+                if (pc == start) { for (size_t i = 0; i < touched.n; ++i) seen[touched.v[i]] = 0; free(work.v); free(touched.v); return 0; }
+                break;
+            }
+            seen[pc] = 1; push(&touched, pc);
+            const uint64_t next = pc + ins.length;
+            if (next > end) end = next;
+            references(&ins, ops, next, refs);
+            const int m = ins.mnemonic;
+            if (m == ZYDIS_MNEMONIC_RET || m == ZYDIS_MNEMONIC_UD2 || m == ZYDIS_MNEMONIC_HLT || m == ZYDIS_MNEMONIC_INT3) break;
+            if (ins.meta.category == ZYDIS_CATEGORY_COND_BR || m == ZYDIS_MNEMONIC_JMP) {
+                if (ops[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && ops[0].imm.is_relative) {
+                    const uint64_t t = next + ops[0].imm.value.s;
+                    if (t >= start && t < limit) push(&work, t);
+                }
+                if (m == ZYDIS_MNEMONIC_JMP) break;
+            }
+            pc = next;
+        }
+    }
+    for (size_t i = 0; i < touched.n; ++i) seen[touched.v[i]] = 0;
+    free(work.v); free(touched.v);
+    return end - start;
+}
+
+/* Adds the functions reached from the known ones and from the pointers, until none is new. */
+static uint32_t discover(Function **functions, uint32_t n, const char *pointers) {
+    for (int i = 0; i < nloads; ++i)
+        if (loads[i]->p_flags & PF_X) { code_lo = loads[i]->p_vaddr; code_hi = loads[i]->p_vaddr + loads[i]->p_filesz; }
+    ZydisDecoder dec;
+    ZydisDecoderInit(&dec, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+    List candidates = {0};
+    if (pointers) {
+        FILE *f = fopen(pointers, "r");
+        if (!f) { perror(pointers); exit(1); }
+        char line[64];
+        while (fgets(line, sizeof(line), f)) {
+            const uint64_t t = strtoull(line, NULL, 0);
+            if (t >= code_lo && t < code_hi) push(&candidates, t);
+        }
+        fclose(f);
+    }
+    /* References from the unwound functions (linear: their extent is exact). */
+    for (uint32_t i = 0; i < n; ++i) {
+        const Function fn = (*functions)[i];
+        const unsigned char *code = at(fn.start, fn.size);
+        if (!code) continue;
+        for (uint64_t off = 0; off < fn.size;) {
+            ZydisDecodedInstruction ins;
+            ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
+            if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec, code + off, fn.size - off, &ins, ops))) { ++off; continue; }
+            references(&ins, ops, fn.start + off + ins.length, &candidates);
+            off += ins.length;
+        }
+    }
+    for (int round = 1; candidates.n; ++round) {
+        qsort(candidates.v, candidates.n, sizeof(uint64_t), by_u64);
+        List fresh = {0};
+        for (size_t i = 0; i < candidates.n; ++i) {
+            const uint64_t t = candidates.v[i];
+            if ((i && t == candidates.v[i - 1]) || containing(*functions, n, t)) continue;
+            push(&fresh, t);
+        }
+        candidates.n = 0;
+        if (!fresh.n) break;
+        /* Each new start is bounded by the next known or new start. */
+        *functions = realloc(*functions, (n + fresh.n) * sizeof(Function));
+        uint32_t added = 0;
+        for (size_t i = 0; i < fresh.n; ++i) {
+            const uint64_t t = fresh.v[i];
+            uint64_t limit = next_start(*functions, n, t);
+            if (i + 1 < fresh.n && fresh.v[i + 1] < limit) limit = fresh.v[i + 1];
+            const uint64_t size = follow(&dec, t, limit, &candidates);
+            if (size) (*functions)[n + added++] = (Function){t, size};
+        }
+        n += added;
+        qsort(*functions, n, sizeof(Function), by_start);
+        fprintf(stderr, "round %d: %u new functions\n", round, added);
+        free(fresh.v);
+    }
+    free(candidates.v);
+    return n;
+}
+
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s ELF OUTDIR\n", argv[0]);
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "usage: %s ELF OUTDIR [POINTERS]\n", argv[0]);
         return 2;
     }
     FILE *in = fopen(argv[1], "rb");
@@ -108,6 +268,8 @@ int main(int argc, char **argv) {
         functions[nfunctions++] = (Function){eh_frame->p_vaddr + loc, range};
     }
     qsort(functions, nfunctions, sizeof(Function), by_start);
+    const uint32_t unwound = nfunctions;
+    nfunctions = discover(&functions, nfunctions, argc > 3 ? argv[3] : NULL);
 
     char path[1024];
     FILE *out_functions, *out_calls, *out_slots, *out_strings;
@@ -181,8 +343,8 @@ int main(int argc, char **argv) {
                 (unsigned long long)undecodable);
     }
     fclose(out_functions); fclose(out_calls); fclose(out_slots); fclose(out_strings);
-    printf("%u functions, %llu instructions, %llu direct calls, %llu string references\n",
-           nfunctions, (unsigned long long)total_instructions, (unsigned long long)total_calls,
+    printf("%u functions (%u from the unwind tables), %llu instructions, %llu direct calls, %llu string references\n",
+           nfunctions, unwound, (unsigned long long)total_instructions, (unsigned long long)total_calls,
            (unsigned long long)total_strings);
     return 0;
 }

@@ -1205,23 +1205,32 @@ int main(int argc, char **argv) {
         if (!size) { fprintf(stderr, "%#" PRIx64 ": not in %s\n", offset, argv[2]); return 1; }
         functions[function_count++] = (Function){offset, size};
     }
+    /* By offset, once each. */
+    qsort(functions, function_count, sizeof(*functions), by_offset); /* offset first in Function */
+    size_t unique = 0;
+    for (size_t i = 0; i < function_count; ++i)
+        if (!unique || functions[i].offset != functions[unique - 1].offset) functions[unique++] = functions[i];
+    function_count = unique;
     recompiled = malloc(function_count * sizeof(*recompiled));
     for (size_t i = 0; i < function_count; ++i) recompiled[i] = functions[i].offset;
-    qsort(recompiled, function_count, sizeof(*recompiled), by_offset);
-    /* The functions in files of about CHUNK instructions (OUT_<n>.c, compiled in parallel), the
-     * table in OUT.c. */
-    enum { CHUNK = 20000 };
+    /* A file per WINDOW of the image (OUT_<window>.c, compiled in parallel; the table in OUT.c):
+     * adding functions changes only the files of their windows, and recomp.sh compiles only files
+     * that changed. */
+    enum { WINDOW = 0x20000 };
     char path[1024];
     const size_t stem = strlen(argv[3]) - (strlen(argv[3]) > 2 && !strcmp(argv[3] + strlen(argv[3]) - 2, ".c") ? 2 : 0);
     uint64_t stats[3] = {0, 0, 0}; /* translated, indirect jumps, instructions */
     int files = 0;
+    uint64_t window = UINT64_MAX;
     out = NULL;
     for (size_t i = 0; i < function_count; ++i) {
-        if (!out || stats[2] >= (uint64_t)files * CHUNK) {
+        if (functions[i].offset / WINDOW != window) {
             if (out) close_output();
-            snprintf(path, sizeof(path), "%.*s_%d.c", (int)stem, argv[3], files++);
+            window = functions[i].offset / WINDOW;
+            snprintf(path, sizeof(path), "%.*s_%05" PRIx64 ".c", (int)stem, argv[3], window);
             out = fopen(path, "w");
             if (!out) { perror(path); return 1; }
+            ++files;
             emit("/* Written by tools/recomp/bbrecomp.c from the game's eboot.bin: not to be distributed. */\n");
             emit("#include \"recomp/rc.h\"\n\nextern const RcApi *rc;\n");
         }
