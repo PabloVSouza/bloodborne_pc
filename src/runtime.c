@@ -1,5 +1,6 @@
 /* Narrow, explicit PS4 libc contracts. No automatic success stubs. */
 #define _CRT_RAND_S
+#include <math.h>
 #include "runtime.h"
 #include "cpu/bbcpu.h"
 #include "gpu/bbgpu.h"
@@ -220,6 +221,11 @@ static ABI int guest_memcmp(const void *a, const void *b, size_t size) {
     atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed); return memcmp(a, b, size);
 }
 static ABI size_t guest_strlen(const char *text) { return strlen(text); }
+/* Busy libc calls of the game (recompiled code reaches these without the translator). */
+static ABI int guest_strcmp(const char *a, const char *b) { return strcmp(a, b); }
+static ABI ldiv_t guest_ldiv(long a, long b) { return ldiv(a, b); }
+static ABI float guest_powf(float x, float y) { return powf(x, y); }
+static ABI float guest_modff(float x, float *integral) { return modff(x, integral); }
 static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {
     printf("Runtime: guest requested exit(%d)\n", status);
     runtime_finalize(NULL);
@@ -257,6 +263,10 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
     if (!strcmp(name, "+P6FRGH4LfA#q#q")) return (uintptr_t)guest_memmove;
     if (!strcmp(name, "DfivPArhucg#q#q")) return (uintptr_t)guest_memcmp;
     if (!strcmp(name, "j4ViWNHEgww#q#q")) return (uintptr_t)guest_strlen;
+    if (!strcmp(name, "Ovb2dSJOAuE#q#q")) return (uintptr_t)guest_strcmp;
+    if (!strcmp(name, "gfP0im5Z3g0#q#q")) return (uintptr_t)guest_ldiv;
+    if (!strcmp(name, "1D0H2KNjshE#q#q")) return (uintptr_t)guest_powf;
+    if (!strcmp(name, "3+UPM-9E6xY#q#q")) return (uintptr_t)guest_modff;
     if (!strcmp(name, "vNe1w4diLCs#p#J")) return (uintptr_t)guest_tls_get_addr;
     if (!strcmp(name, "959qrazPIrg#p#J")) return (uintptr_t)guest_procparam;
     if (!strcmp(name, "p5EcQeEeJAE#p#J")) return (uintptr_t)guest_set_heap_api;

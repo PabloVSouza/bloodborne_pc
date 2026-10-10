@@ -100,9 +100,33 @@ typedef struct { jmp_buf jump; } Frame; /* _setjmp: no signal mask */
 static _Thread_local Frame *frames;
 static _Thread_local uint32_t frame_depth, frame_capacity;
 
+/* Statistics for the report: calls into the translator, longjmps to an outer frame, deepest. */
+static uint64_t translated_runs, frame_jumps, deepest_frame, recomp_image_base, host_calls;
+/* BB_RECOMP_TARGETS=1: the targets of calls into the translator, counted (sampled 1 in 64). */
+enum { TARGET_SLOTS = 4096 };
+static struct { uint64_t rip, count; } targets[TARGET_SLOTS];
+static int count_targets(void) {
+    static int value = -1;
+    if (value < 0) value = getenv("BB_RECOMP_TARGETS") && getenv("BB_RECOMP_TARGETS")[0] == '1';
+    return value;
+}
+static void note_target(uint64_t rip) {
+    static _Thread_local uint32_t tick;
+    if ((++tick & 63) || !count_targets()) return;
+    for (uint32_t i = 0, h = (uint32_t)((rip * 0x9e3779b97f4a7c15ull) >> 52); i < 16; ++i) {
+        uint64_t *slot = &targets[(h + i) % TARGET_SLOTS].rip, expected = 0;
+        if (__atomic_load_n(slot, __ATOMIC_RELAXED) == rip ||
+            __atomic_compare_exchange_n(slot, &expected, rip, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+            __atomic_add_fetch(&targets[(h + i) % TARGET_SLOTS].count, 1, __ATOMIC_RELAXED);
+            return;
+        }
+    }
+}
+
 static void return_hook(BbCpu *cpu) {
     const uint64_t rip = cpu->rip;
     if (rip < FRAME_BASE || rip >= FRAME_BASE + (uint64_t)frame_depth * 16 || (rip & 15)) return;
+    __atomic_add_fetch(&frame_jumps, 1, __ATOMIC_RELAXED);
     _longjmp(frames[(rip - FRAME_BASE) / 16].jump, 1);
 }
 
@@ -115,6 +139,9 @@ static void run_translated(BbCpu *cpu, uint64_t slot) {
         if (!frames) abort();
     }
     const volatile uint32_t depth = frame_depth++;
+    __atomic_add_fetch(&translated_runs, 1, __ATOMIC_RELAXED);
+    note_target(cpu->rip);
+    if (depth + 1 > __atomic_load_n(&deepest_frame, __ATOMIC_RELAXED)) __atomic_store_n(&deepest_frame, depth + 1, __ATOMIC_RELAXED);
     const uint64_t stop = FRAME_BASE + (uint64_t)depth * 16;
     bb_store(slot, 8, stop);
     if (_setjmp(frames[depth].jump) == 0) bbcpu_run(cpu, stop);
@@ -147,6 +174,23 @@ static void rc_call(BbCpu *cpu, uint64_t target, uint64_t next) {
         fn(cpu);
         return;
     }
+    /* An import stub (jmp [rip+slot]) whose slot holds a host function (the runtime's libraries):
+     * that function at once, returning to `next`, without the translator. */
+    if (bbcpu_is_guest_code(target)) {
+        const uint8_t *code = (const uint8_t *)(uintptr_t)target;
+        if (code[0] == 0xff && code[1] == 0x25) {
+            int32_t disp;
+            memcpy(&disp, code + 2, 4);
+            const uint64_t host = bb_load(target + 6 + (uint64_t)(int64_t)disp, 8);
+            if (host && !bbcpu_is_guest_code(host)) {
+                __atomic_add_fetch(&host_calls, 1, __ATOMIC_RELAXED);
+                bb_store(cpu->r[RSP], 8, next);
+                cpu->rip = host;
+                bbcpu_call_host_at_rip(cpu); /* returns with rip at `next` */
+                return;
+            }
+        }
+    }
     /* The translator (and natives, imports: bbcpu_run calls them). */
     cpu->rip = target;
     run_translated(cpu, cpu->r[RSP]);
@@ -177,8 +221,28 @@ static void *report(void *unused) {
     for (uint64_t last = 0;;) {
         sleep(10);
         const uint64_t now = __atomic_load_n(&bbcpu_recomp_calls, __ATOMIC_RELAXED);
-        if (now != last) printf("Recompiled: %.0f calls/s\n", (double)(now - last) / 10.0);
+        static uint64_t last_runs;
+        const uint64_t runs = __atomic_load_n(&translated_runs, __ATOMIC_RELAXED);
+        if (now != last)
+            printf("Recompiled: %.0f calls/s; %.0f/s into the translator, %.0f/s straight to host imports, "
+                   "%llu longjmps to outer frames, frames up to %llu deep\n", (double)(now - last) / 10.0,
+                   (double)(runs - last_runs) / 10.0, (double)(__atomic_exchange_n(&host_calls, 0, __ATOMIC_RELAXED)) / 10.0,
+                   (unsigned long long)__atomic_load_n(&frame_jumps, __ATOMIC_RELAXED),
+                   (unsigned long long)__atomic_load_n(&deepest_frame, __ATOMIC_RELAXED));
         last = now;
+        last_runs = runs;
+        if (count_targets()) {
+            uint64_t best[10][2] = {{0}};
+            for (int i = 0; i < TARGET_SLOTS; ++i) {
+                const uint64_t c = __atomic_exchange_n(&targets[i].count, 0, __ATOMIC_RELAXED);
+                for (int k = 0; k < 10; ++k)
+                    if (c > best[k][1]) { memmove(best[k + 1], best[k], (size_t)(9 - k) * sizeof(best[0])); best[k][0] = targets[i].rip; best[k][1] = c; break; }
+            }
+            printf("Recompiled: calls into the translator by target (x64 samples):");
+            for (int k = 0; k < 10 && best[k][1]; ++k)
+                printf(" %#llx:%llu", (unsigned long long)(best[k][0] - recomp_image_base), (unsigned long long)best[k][1] * 64);
+            printf("\n");
+        }
     }
     return NULL;
 }
@@ -226,6 +290,7 @@ static int in_set(const OffsetSet *set, uint64_t offset) {
 }
 
 void bbcpu_recomp_load(uint64_t image_base) {
+    recomp_image_base = image_base;
     const char *path = getenv("BB_RECOMP_LIB");
     if (!path || !*path) return;
     void *library = dlopen(path, RTLD_NOW | RTLD_LOCAL);

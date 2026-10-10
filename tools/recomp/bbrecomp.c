@@ -88,8 +88,11 @@ static uint64_t size_of(const char *tsv, uint64_t offset) {
         }
         fclose(f);
     }
-    for (size_t i = 0; i < count; ++i)
-        if (starts[i] == offset) return sizes[i];
+    for (size_t lo = 0, hi = count; lo < hi;) { /* functions.tsv is sorted */
+        const size_t mid = (lo + hi) / 2;
+        if (starts[mid] == offset) return sizes[mid];
+        if (starts[mid] < offset) lo = mid + 1; else hi = mid;
+    }
     return 0;
 }
 
@@ -1211,12 +1214,24 @@ int main(int argc, char **argv) {
     static BbCpu warm;
     bbcpu_run(&warm, 0); /* the interpreter's tables */
     trace_points = getenv("BB_RECOMP_TRACE") && getenv("BB_RECOMP_TRACE")[0] == '1';
-    functions = calloc((size_t)argc, sizeof(*functions));
+    /* OFFSET... or @LIST (one offset a line). */
+    size_t capacity = (size_t)argc;
+    functions = calloc(capacity, sizeof(*functions));
     for (int i = 4; i < argc; ++i) {
-        const uint64_t offset = strtoull(argv[i], NULL, 0);
-        const uint64_t size = size_of(argv[2], offset);
-        if (!size) { fprintf(stderr, "%#" PRIx64 ": not in %s\n", offset, argv[2]); return 1; }
-        functions[function_count++] = (Function){offset, size};
+        FILE *list = argv[i][0] == '@' ? fopen(argv[i] + 1, "r") : NULL;
+        if (argv[i][0] == '@' && !list) { perror(argv[i] + 1); return 1; }
+        char line[64];
+        while (list ? fgets(line, sizeof(line), list) != NULL : (snprintf(line, sizeof(line), "%s", argv[i]), 1)) {
+            const uint64_t offset = strtoull(line, NULL, 0);
+            if (offset || !list) {
+                const uint64_t size = size_of(argv[2], offset);
+                if (!size) { fprintf(stderr, "%#" PRIx64 ": not in %s\n", offset, argv[2]); return 1; }
+                if (function_count == capacity) { capacity *= 2; functions = realloc(functions, capacity * sizeof(*functions)); }
+                functions[function_count++] = (Function){offset, size};
+            }
+            if (!list) break;
+        }
+        if (list) fclose(list);
     }
     /* Functions that call setjmp stay with the translator: the setjmp's return address would be
      * the runtime's (rc->call), and a longjmp cannot come back into a C function that went on.
