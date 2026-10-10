@@ -102,6 +102,19 @@ static inline void rc_st(uint64_t address, int size, uint64_t value) { bb_store(
 static inline uint64_t rc_lds(uint64_t address, int size) { return bb_load(address, size); }
 static inline void rc_sts(uint64_t address, int size, uint64_t value) { bb_store(address, size, value); }
 
+/* One atomic compare-and-exchange (lock prefixes; the interpreter's atomic_cas): *seen gets the
+ * value the operation found. */
+static inline int rc_cas(uint64_t address, int size, uint64_t expected, uint64_t desired, uint64_t *seen) {
+    int ok;
+    switch (size) {
+    case 1: { uint8_t e = (uint8_t)expected; ok = __atomic_compare_exchange_n((uint8_t *)address, &e, (uint8_t)desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); *seen = e; break; }
+    case 2: { uint16_t e = (uint16_t)expected; ok = __atomic_compare_exchange_n((uint16_t *)address, &e, (uint16_t)desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); *seen = e; break; }
+    case 4: { uint32_t e = (uint32_t)expected; ok = __atomic_compare_exchange_n((uint32_t *)address, &e, (uint32_t)desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); *seen = e; break; }
+    default: { uint64_t e = expected; ok = __atomic_compare_exchange_n((uint64_t *)address, &e, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); *seen = e; break; }
+    }
+    return ok;
+}
+
 /* SZP of a result into flags f (the interpreter's set_szp). */
 static inline uint64_t rc_szp(uint64_t f, uint64_t r, int size) {
     r &= rc_mask(size);
@@ -110,6 +123,36 @@ static inline uint64_t rc_szp(uint64_t f, uint64_t r, int size) {
     if (r & (UINT64_C(1) << (size * 8 - 1))) f |= F_SF;
     if (!__builtin_parity((unsigned)(r & 0xff))) f |= F_PF;
     return f;
+}
+
+/* Flags after adc (sub = 0) or sbb (sub = 1) of a and b with carry giving r (the interpreter's). */
+static inline uint64_t rc_carry_flags(uint64_t f, int sub, uint64_t a, uint64_t b, uint64_t carry, uint64_t r, int size) {
+    const uint64_t m = rc_mask(size), sign = UINT64_C(1) << (size * 8 - 1);
+    a &= m; b &= m; r &= m;
+    f &= ~(uint64_t)F_ARITH;
+    if (sub ? (carry ? a <= b : a < b) : (carry ? r <= a : r < a)) f |= F_CF;
+    if (sub ? ((a ^ b) & (a ^ r) & sign) : ((a ^ r) & (b ^ r) & sign)) f |= F_OF;
+    if ((a ^ b ^ r) & 0x10) f |= F_AF;
+    return rc_szp(f, r, size);
+}
+
+/* Float to integer conversions (the interpreter's cvt_f2i32/64): out of range, the "integer
+ * indefinite"; rounding from mxcsr unless truncating. */
+static inline double rc_round_mxcsr(double x, uint32_t mxcsr) {
+    switch ((mxcsr >> 13) & 3) {
+    case 0: return __builtin_nearbyint(x);
+    case 1: return __builtin_floor(x);
+    case 2: return __builtin_ceil(x);
+    default: return x;
+    }
+}
+static inline int32_t rc_f2i32(double x, int truncate, uint32_t mxcsr) {
+    if (x != x || x >= 2147483648.0 || x < -2147483648.0) return INT32_MIN;
+    return (int32_t)(truncate ? x : rc_round_mxcsr(x, mxcsr));
+}
+static inline int64_t rc_f2i64(double x, int truncate, uint32_t mxcsr) {
+    if (x != x || x >= 9223372036854775808.0 || x < -9223372036854775808.0) return INT64_MIN;
+    return (int64_t)(truncate ? x : rc_round_mxcsr(x, mxcsr));
 }
 
 /* Flags after shl/shr/sar of `a` by `count` (masked, non-zero) giving `r` (the interpreter's). */
