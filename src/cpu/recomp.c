@@ -111,7 +111,7 @@ static void rc_call(BbCpu *cpu, uint64_t target, uint64_t next) {
     const RcFn fn = no_direct() || !bbcpu_recomp_thread_ok() ? NULL : bbcpu_recomp_at(target);
     cpu->r[RSP] -= 8;
     if (fn) {
-        __atomic_add_fetch(&bbcpu_recomp_calls, 1, __ATOMIC_RELAXED);
+        bbcpu_recomp_counted();
         bb_store(cpu->r[RSP], 8, next);
         cpu->rip = target;
         fn(cpu);
@@ -127,7 +127,7 @@ static void rc_call(BbCpu *cpu, uint64_t target, uint64_t next) {
 static void rc_tail(BbCpu *cpu) {
     const RcFn fn = no_direct() || !bbcpu_recomp_thread_ok() ? NULL : bbcpu_recomp_at(cpu->rip);
     if (fn) {
-        __atomic_add_fetch(&bbcpu_recomp_calls, 1, __ATOMIC_RELAXED);
+        bbcpu_recomp_counted();
         fn(cpu);
         return;
     }
@@ -190,6 +190,7 @@ void bbcpu_recomp_load(uint64_t image_base) {
             continue;
         }
         add(image_base + functions[i].offset, functions[i].fn);
+        if (functions[i].direct && !no_direct()) *functions[i].direct = functions[i].fn;
         ++used;
     }
     printf("Recompiled: %zu of %zu game functions replaced, %zu changed by patches (%s)\n", used, count,

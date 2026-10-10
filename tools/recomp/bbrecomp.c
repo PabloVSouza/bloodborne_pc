@@ -206,12 +206,22 @@ static int cc_of(int m) {
 
 typedef struct { uint64_t start, end; } Range;
 
+/* The functions being recompiled, by offset: calls of them go through their direct-call slot
+ * (d_<offset>, rc.h) when the program filled it. */
+static uint64_t *recompiled;
+static int by_offset(const void *a, const void *b);
+static int is_recompiled(uint64_t t) {
+    return recompiled && bsearch(&t, recompiled, function_count, sizeof(*recompiled), by_offset) != NULL;
+}
+
 /* A jump to image offset `t`: a goto inside the function. Out of it: a tail call when the stack is
  * back at the entry (the return address on top), else code of this function elsewhere (a part the
  * compiler moved out, a shared block): the translator runs the rest, the function's return address
  * at entry_rsp (rc->bail). */
 static void jump(Range f, uint64_t t) {
     if (t >= f.start && t < f.end) emit("goto L_%" PRIx64 ";", t);
+    else if (is_recompiled(t))
+        emit("{ extern RcFn d_%" PRIx64 "; " SPILL " " FLAGS_OUT " c->rip = B + 0x%" PRIx64 "ull; if (r[RSP] == entry_rsp) { if (d_%" PRIx64 ") d_%" PRIx64 "(c); else rc->tail(c); } else rc->bail(c, entry_rsp); return; }", t, t, t, t);
     else emit("{ " SPILL " " FLAGS_OUT " c->rip = B + 0x%" PRIx64 "ull; if (r[RSP] == entry_rsp) rc->tail(c); else rc->bail(c, entry_rsp); return; }", t);
 }
 
@@ -360,9 +370,16 @@ static int translate(Range f, uint64_t off, const BbInsn *in, uint64_t *stats) {
         return 1;
     case M(CALL): {
         if (d->type == OP_IMM) {
-            /* Every call through the runtime, recompiled callees included (it runs them directly):
-             * the replay answers each call from the record. */
-            b = str("B + 0x%" PRIx64 "ull", off + (uint64_t)d->disp);
+            /* A recompiled callee directly, when the program filled its slot (the game: the ones it
+             * runs; the replay leaves them empty and answers each call from the record). */
+            const uint64_t t = off + (uint64_t)d->disp;
+            if (is_recompiled(t)) {
+                emit("{ extern RcFn d_%" PRIx64 "; " SPILL " if (d_%" PRIx64 ") { c->r[RSP] -= 8; rc_st(c->r[RSP], 8, B + 0x%" PRIx64
+                     "ull); c->rip = B + 0x%" PRIx64 "ull; d_%" PRIx64 "(c); } else rc->call(c, B + 0x%" PRIx64 "ull, B + 0x%" PRIx64
+                     "ull); " RELOAD " fk = FK_CPU; }\n", t, t, next, t, t, t, next);
+                return 1;
+            }
+            b = str("B + 0x%" PRIx64 "ull", t);
         } else if (!read_op(off, in, d, 8, &b)) {
             return 0;
         }
@@ -856,6 +873,9 @@ int main(int argc, char **argv) {
         if (!size) { fprintf(stderr, "%#" PRIx64 ": not in %s\n", offset, argv[2]); return 1; }
         functions[function_count++] = (Function){offset, size};
     }
+    recompiled = malloc(function_count * sizeof(*recompiled));
+    for (size_t i = 0; i < function_count; ++i) recompiled[i] = functions[i].offset;
+    qsort(recompiled, function_count, sizeof(*recompiled), by_offset);
     /* The functions in files of about CHUNK instructions (OUT_<n>.c, compiled in parallel), the
      * table in OUT.c. */
     enum { CHUNK = 20000 };
@@ -880,11 +900,14 @@ int main(int argc, char **argv) {
     if (!out) { perror(argv[3]); return 1; }
     emit("/* Written by tools/recomp/bbrecomp.c from the game's eboot.bin: not to be distributed. */\n");
     emit("#include \"recomp/rc.h\"\n\n__attribute__((visibility(\"hidden\"))) const RcApi *rc;\n");
-    for (size_t i = 0; i < function_count; ++i) emit("void f_%" PRIx64 "(BbCpu *c);\n", functions[i].offset);
+    for (size_t i = 0; i < function_count; ++i)
+        emit("void f_%" PRIx64 "(BbCpu *c);\n__attribute__((visibility(\"hidden\"))) RcFn d_%" PRIx64 ";\n",
+             functions[i].offset, functions[i].offset);
     emit("\nstatic const RcFunction table[] = {\n");
     for (size_t i = 0; i < function_count; ++i)
-        emit("    {0x%" PRIx64 ", %" PRIu64 ", 0x%" PRIx64 "ull, f_%" PRIx64 "},\n", functions[i].offset,
-             functions[i].size, bbcpu_recomp_hash(base + functions[i].offset, functions[i].size), functions[i].offset);
+        emit("    {0x%" PRIx64 ", %" PRIu64 ", 0x%" PRIx64 "ull, f_%" PRIx64 ", &d_%" PRIx64 "},\n", functions[i].offset,
+             functions[i].size, bbcpu_recomp_hash(base + functions[i].offset, functions[i].size), functions[i].offset,
+             functions[i].offset);
     emit("};\n\n__attribute__((visibility(\"default\"))) const RcFunction *bb_recomp_init(const RcApi *api, size_t *count) {\n");
     emit("    rc = api;\n    *count = sizeof(table) / sizeof(table[0]);\n    return table;\n}\n");
     fclose(out);

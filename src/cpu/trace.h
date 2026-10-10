@@ -55,6 +55,15 @@ void bbcpu_call_native(BbCpu *cpu, const void *fn);
 typedef void (*RcFn)(BbCpu *cpu);
 extern int bbcpu_recomp_count;
 extern uint64_t bbcpu_recomp_calls;
+/* Counts a call of a recompiled function: per thread, added to bbcpu_recomp_calls in batches (one
+ * shared counter costs as much as a short function when every thread calls them). */
+static inline void bbcpu_recomp_counted(void) {
+    static _Thread_local uint32_t pending;
+    if (++pending == 4096) {
+        __atomic_add_fetch(&bbcpu_recomp_calls, pending, __ATOMIC_RELAXED);
+        pending = 0;
+    }
+}
 RcFn bbcpu_recomp_at(uint64_t address);
 /* Whether this thread runs recompiled functions (BB_RECOMP_THREADS, diagnostics). */
 int bbcpu_recomp_thread_ok(void);

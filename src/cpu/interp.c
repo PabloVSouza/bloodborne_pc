@@ -911,7 +911,7 @@ uint64_t bbcpu_step(BbCpu *cpu, const BbInsn *in) {
     if (__builtin_expect(bbcpu_recomp_count, 0) && !(bbcpu_record_armed && bbcpu_record_target(cpu->rip))) {
         const RcFn fn = bbcpu_recomp_at(cpu->rip);
         if (fn && bbcpu_recomp_thread_ok()) {
-            __atomic_add_fetch(&bbcpu_recomp_calls, 1, __ATOMIC_RELAXED);
+            bbcpu_recomp_counted();
             fn(cpu);
             return cpu->rip;
         }

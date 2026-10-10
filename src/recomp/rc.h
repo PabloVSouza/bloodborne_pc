@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-#define BB_RECOMP_API_VERSION 3u
+#define BB_RECOMP_API_VERSION 4u
 #define BB_RECOMP_INIT "bb_recomp_init"
 
 typedef struct {
@@ -38,8 +38,10 @@ typedef struct {
 typedef void (*RcFn)(BbCpu *cpu);
 #endif
 /* A recompiled function: its image offset and size, and the hash of the code it was generated
- * from (bbcpu_recomp_hash): a function the game's patches changed is left to the translator. */
-typedef struct { uint64_t offset, size, hash; RcFn fn; } RcFunction;
+ * from (bbcpu_recomp_hash): a function the game's patches changed is left to the translator.
+ * `direct`: the slot the library's own calls of it go through, NULL until the program sets it to
+ * `fn` (the functions it runs); empty, they go through RcApi.call. */
+typedef struct { uint64_t offset, size, hash; RcFn fn; RcFn *direct; } RcFunction;
 /* The library's entry point: keeps `api`, returns its functions. */
 typedef const RcFunction *(*RcInit)(const RcApi *api, size_t *count);
 
