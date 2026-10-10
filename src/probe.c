@@ -634,6 +634,8 @@ int main(int argc, char **argv) {
         /* The traps of unresolved imports are x86 stubs jumping to unresolved(): interpreted too. */
         bbcpu_add_guest_code((uintptr_t)traps, round_page((import_count + 1) * 32));
         puts("CPU: guest code runs through bbcpu (BB_CPU=interp)");
+        /* Recompiled functions: checked against the code as patched above. */
+        bbcpu_recomp_load(bb_image_base);
     }
 #endif
     game.native_libc=native_libc; game.ns=ns; game.nb=nb; game.procparam=procparam; game.entry=entry;

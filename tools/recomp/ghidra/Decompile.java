@@ -2,7 +2,7 @@
 // file per function (OUTDIR/<offset>.c, its instructions in OUTDIR/<offset>.s), without analyzing
 // the whole image (docs/RECOMPILATION.md).
 // Offsets are image offsets (tools/recomp/scan.c); each function is disassembled and created where
-// the unwind tables put it. Run through tools/recomp/decompile.sh.
+// the unwind tables put it. Run through tools/recomp/inspect.sh.
 // @category bbport
 
 import java.io.File;

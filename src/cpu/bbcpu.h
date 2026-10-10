@@ -29,6 +29,8 @@ void bbcpu_call_full(uintptr_t fn, const uint64_t gpr[6], const uint8_t xmm[8][1
 /* Native versions of game functions (docs/RECOMPILATION.md): a call of guest `address` runs host
  * function `fn` (SysV arguments bridged, like a host import). Set before guest code runs. */
 void bbcpu_set_native(uint64_t address, const void *fn);
+/* BB_RECOMP_LIB: recompiled game functions replace the translated ones (recomp.c). */
+void bbcpu_recomp_load(uint64_t image_base);
 /* Like bbcpu_call on a new guest stack [stack, stack + size) (thread entry, game entry). */
 uint64_t bbcpu_call_on_stack(uintptr_t fn, int count, const uint64_t *args, void *stack,
                              size_t size);

@@ -48,4 +48,17 @@ const void *bbcpu_native_at(uint64_t address);
  * no return address pushed; interp.c). */
 void bbcpu_call_native(BbCpu *cpu, const void *fn);
 
+/* Recompiled game functions (recomp.c, src/recomp/rc.h): the one at `address`, or NULL. */
+typedef void (*RcFn)(BbCpu *cpu);
+extern int bbcpu_recomp_count;
+extern uint64_t bbcpu_recomp_calls;
+RcFn bbcpu_recomp_at(uint64_t address);
+/* The hash of the code at [start, start + size) the recompiler goes by (recomp.c): instruction
+ * bytes, the loader's TCB loads (mov reg, fs:[0], rewritten as gs loads) as one token. */
+uint64_t bbcpu_recomp_hash(uint64_t start, uint64_t size);
+/* Whether `in` loads the TCB pointer: mov reg, fs:[0] or the loader's gs form of it. */
+int bbcpu_is_tcb_load(const BbInsn *in);
+/* One instruction in the interpreter, without bbcpu_step's hooks (record, native, recompiled). */
+uint64_t bbcpu_step_insn(BbCpu *cpu, const BbInsn *in);
+
 #endif

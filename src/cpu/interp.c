@@ -907,6 +907,19 @@ uint64_t bbcpu_step(BbCpu *cpu, const BbInsn *in) {
             return pop(cpu);
         }
     }
+    /* A recompiled version of the function (recomp.c), unless it is being recorded. */
+    if (__builtin_expect(bbcpu_recomp_count, 0) && !(bbcpu_record_armed && bbcpu_record_target(cpu->rip))) {
+        const RcFn fn = bbcpu_recomp_at(cpu->rip);
+        if (fn) {
+            __atomic_add_fetch(&bbcpu_recomp_calls, 1, __ATOMIC_RELAXED);
+            fn(cpu);
+            return cpu->rip;
+        }
+    }
+    return bbcpu_step_insn(cpu, in);
+}
+
+uint64_t bbcpu_step_insn(BbCpu *cpu, const BbInsn *in) {
     const int locked = in->lock || (in->mnemonic == M(XCHG) &&
                                     (in->op[0].type == OP_MEM || in->op[1].type == OP_MEM));
     if (!locked) return step(cpu, in);
