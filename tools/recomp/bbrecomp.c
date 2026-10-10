@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #define M(name) ZYDIS_MNEMONIC_##name
 
@@ -686,12 +687,16 @@ static Insn *decode(Function fn, size_t *count) {
     return list;
 }
 
+/* Snippet mode (fuzzing, tests/fuzz_recomp.c): one instruction, then a return at its end. */
+static int snippet_mode;
+static uint64_t snippet_line;
+
 static void generate(Function fn, uint64_t *stats) {
     size_t count;
     Insn *list = decode(fn, &count);
     const Range f = {fn.offset, fn.offset + fn.size};
     emit("\n/* 0x%" PRIx64 ", %" PRIu64 " bytes, %zu instructions */\n", fn.offset, fn.size, count);
-    emit("static void f_%" PRIx64 "(BbCpu *c) {\n", fn.offset);
+    emit("static void %s_%" PRIx64 "(BbCpu *c) {\n", snippet_mode ? "s" : "f", snippet_mode ? snippet_line : fn.offset);
     emit("    const uint64_t B = rc->image_base;\n");
     emit("    uint64_t r[16];\n    " RELOAD "\n");
     emit("    int fk = FK_CPU, fz = 8, fcf = 0;\n    uint64_t fa = 0, fb = 0, fr = 0, dn = 0;\n");
@@ -710,6 +715,7 @@ static void generate(Function fn, uint64_t *stats) {
              " if (n != B + 0x%" PRIx64 "ull) { dn = n; goto L_dispatch; } }\n",
              ZydisMnemonicGetString((ZydisMnemonic)x->in.mnemonic), x->off, x->off + x->in.length);
     }
+    if (snippet_mode) emit("    " SPILL " " FLAGS_OUT " c->rip = B + 0x%" PRIx64 "ull; return;\n", f.end);
     emit("    dn = B + 0x%" PRIx64 "ull; /* past the end */\n", f.end);
     emit("L_dispatch:\n    switch (dn - B) {\n");
     for (size_t i = 0; i < count; ++i) emit("    case 0x%" PRIx64 ": goto L_%" PRIx64 ";\n", list[i].off, list[i].off);
@@ -720,7 +726,63 @@ static void generate(Function fn, uint64_t *stats) {
     free(list);
 }
 
+/* --snippets ENCODINGS OUT.c: each instruction (hex bytes per line) at CODE_AT, alone; the ones
+ * translated natively get a function s_<line number>, in a table (offset: the line number). */
+#define SNIPPET_AT UINT64_C(0x30000000000)
+static int snippets(const char *encodings, const char *path) {
+    uint8_t *code = mmap((void *)SNIPPET_AT, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+    if (code == MAP_FAILED) { perror("mmap"); return 1; }
+    base = SNIPPET_AT;
+    bbcpu_add_guest_code(SNIPPET_AT, 0x4000);
+    static BbCpu warm;
+    bbcpu_run(&warm, 0);
+    snippet_mode = 1;
+    FILE *in = fopen(encodings, "r");
+    out = fopen(path, "w");
+    if (!in || !out) { perror(encodings); return 1; }
+    emit("/* Written by tools/recomp/bbrecomp.c --snippets (tests/fuzz_recomp.c). */\n");
+    emit("#include \"recomp/rc.h\"\n\nstatic const RcApi *rc;\n");
+    char line[128];
+    uint64_t stats[3] = {0, 0, 0}, number = 0;
+    uint64_t *lines = NULL;
+    size_t count = 0, capacity = 0;
+    while (fgets(line, sizeof(line), in)) {
+        ++number;
+        uint8_t bytes[16];
+        int len = 0;
+        for (const char *p = line; p[0] && p[1] && p[0] != '\n' && len < 15; p += 2) {
+            unsigned v;
+            if (sscanf(p, "%2x", &v) != 1) break;
+            bytes[len++] = (uint8_t)v;
+        }
+        if (!len) continue;
+        memset(code, 0x90, 64);
+        memcpy(code, bytes, (size_t)len);
+        bbcpu_invalidate(SNIPPET_AT, 64);
+        const BbBlock *block = bbcpu_block(SNIPPET_AT);
+        if (!block->count || block->insn[0].length != len || block->insn[0].branch) continue;
+        /* Natively translated only: a fallback is the interpreter itself. */
+        const long mark = ftell(out);
+        const uint64_t before = stats[0];
+        snippet_line = number;
+        generate((Function){0, (uint64_t)len}, stats);
+        if (stats[0] == before) { fseek(out, mark, SEEK_SET); continue; }
+        if (count == capacity) { capacity = capacity ? capacity * 2 : 4096; lines = realloc(lines, capacity * 8); }
+        lines[count++] = number;
+    }
+    emit("\nstatic const RcFunction table[] = {\n");
+    for (size_t i = 0; i < count; ++i) emit("    {%" PRIu64 ", 0, 0, s_%" PRIx64 "},\n", lines[i], lines[i]);
+    emit("};\n\nconst RcFunction *bb_recomp_init(const RcApi *api, size_t *count) {\n");
+    emit("    rc = api;\n    *count = sizeof(table) / sizeof(table[0]);\n    return table;\n}\n");
+    fflush(out);
+    ftruncate(fileno(out), ftell(out));
+    fclose(out);
+    printf("%zu instructions translated natively (of %" PRIu64 " lines)\n", count, number);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "--snippets")) return snippets(argv[2], argv[3]);
     if (argc < 5) {
         fprintf(stderr, "usage: %s ELF FUNCTIONS_TSV OUT.c OFFSET...\n", argv[0]);
         return 2;
