@@ -77,6 +77,7 @@ static int accesses(const BbCpu *cpu_c, const BbInsn *in, Access *out) {
     case M(POPFQ): out[n++] = (Access){rsp, 8}; break;
     case M(LEAVE): out[n++] = (Access){cpu->r[RBP], 8}; break;
     case M(RET): out[n++] = (Access){rsp, 8}; break;
+    case M(MASKMOVDQU): case M(VMASKMOVDQU): out[n++] = (Access){cpu->r[RDI], 16}; break; /* the masked bytes */
     case M(ENTER): return -1;
     default: break;
     }

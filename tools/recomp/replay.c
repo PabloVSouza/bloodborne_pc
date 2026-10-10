@@ -108,6 +108,7 @@ typedef struct {
     const Record *record;
     uint64_t cursor; /* the next event not consumed */
     ByteMap written;
+    ByteMap kept; /* bytes of written operands left as they were (the recorder may have seen them change) */
     uint8_t pre[8][64];
     uint32_t pre_count, post_count;
     int failures;
@@ -149,7 +150,10 @@ static void replay_access(BbTrace *t, int kind, uint64_t address, uint32_t lengt
         const uint32_t i = p->post_count++;
         if (p->post_count == p->pre_count) p->pre_count = p->post_count = 0;
         /* Like the recorder: an operand with a changed byte is written whole. */
-        if (i < 8 && !memcmp(p->pre[i], (const void *)address, length)) return;
+        if (i < 8 && !memcmp(p->pre[i], (const void *)address, length)) {
+            for (uint32_t b = 0; b < length; ++b) map_put(&p->kept, address + b, ((const uint8_t *)address)[b]);
+            return;
+        }
         for (uint32_t b = 0; b < length; ++b) map_put(&p->written, address + b, ((const uint8_t *)address)[b]);
         return;
     }
@@ -237,6 +241,13 @@ static uint64_t map_pages(const Record *r) {
 
 /* The bytes the function wrote, in their final state: its last write, or what a callee left there
  * after it (observed later). Bytes for which `skip` says so are left out. */
+/* BB_REPLAY_WATCH=ADDRESS: what the replay sees happen to one byte (debugging the replay). */
+static uint64_t watch_address(void) {
+    static uint64_t value = 1;
+    if (value == 1) value = getenv("BB_REPLAY_WATCH") ? strtoull(getenv("BB_REPLAY_WATCH"), NULL, 0) : 0;
+    return value;
+}
+
 static void expected_writes(const Record *r, ByteMap *expected, uint64_t skip_lo, uint64_t skip_hi) {
     for (uint64_t offset = 0; event_at(r, offset); offset = event_next(r, offset)) {
         const BbRecEvent *e = event_at(r, offset);
@@ -244,6 +255,9 @@ static void expected_writes(const Record *r, ByteMap *expected, uint64_t skip_lo
         for (uint32_t b = 0; b < e->length; ++b) {
             const uint64_t address = e->address + b;
             if (address >= skip_lo && address < skip_hi) continue;
+            if (address == watch_address())
+                printf("    watch: %s %#x in the record (event at %#" PRIx64 ")\n",
+                       e->kind == BBREC_WRITE ? "written" : "observed", ((const uint8_t *)event_data(e))[b], offset);
             uint8_t old;
             if (e->kind == BBREC_WRITE || map_get(expected, address, &old))
                 map_put(expected, address, ((const uint8_t *)event_data(e))[b]);
@@ -280,7 +294,11 @@ static void collect(NativeReplay *n) {
         uint8_t *now = (uint8_t *)page_address(n, i), *was = n->baseline[i];
         if (!memcmp(now, was, 16384)) continue;
         for (uint32_t b = 0; b < 16384; ++b)
-            if (now[b] != was[b]) map_put(&n->written, (uint64_t)(uintptr_t)now + b, now[b]);
+            if (now[b] != was[b]) {
+                if ((uint64_t)(uintptr_t)now + b == watch_address())
+                    printf("    watch: written %#x (was %#x) by the function\n", now[b], was[b]);
+                map_put(&n->written, (uint64_t)(uintptr_t)now + b, now[b]);
+            }
         memcpy(was, now, 16384);
     }
 }
@@ -315,6 +333,8 @@ static void native_epoch(NativeReplay *n, uint64_t offset) {
                 *(uint8_t *)(n->pointers[best].native + (address - n->pointers[best].recorded)) = data[b];
                 continue;
             }
+            if (address == watch_address())
+                printf("    watch: %#x applied from the record (baseline %s)\n", data[b], baseline_of(n, address) ? "kept" : "MISSING");
             *(uint8_t *)address = data[b];
             uint8_t *base = baseline_of(n, address);
             if (base) *base = data[b];
@@ -599,6 +619,7 @@ static int replay_recomp(const Record *r) {
     cpu.fs_base = r->entry.fs_base;
     cpu.tcb = r->entry.tcb;
     cpu.gs_base = (uint64_t)(uintptr_t)&cpu.tcb - (r->header.tcb_address - r->entry.gs_base);
+    if (watch_address()) printf("    watch: entry rsp %#" PRIx64 "\n", r->entry.r[RSP]);
     recomp_function(&cpu);
     collect(&n);
 
@@ -742,6 +763,10 @@ static int replay(const Record *r) {
         if (!expected.keys[i]) continue;
         uint8_t value;
         if (!map_get(&p.written, expected.keys[i] - 1, &value)) {
+            /* Written with the value it had here: memory the replay does not know before (only
+             * what the function read is in the record) can already hold it. */
+            if (map_get(&p.kept, expected.keys[i] - 1, &value) &&
+                *(const uint8_t *)(uintptr_t)(expected.keys[i] - 1) == expected.values[i]) continue;
             if (missing++ < 4) fail(&p, "not written: %#" PRIx64, expected.keys[i] - 1);
         } else if (value != expected.values[i]) {
             if (wrong++ < 4) fail(&p, "written %#" PRIx64 " = %#x, recorded %#x", expected.keys[i] - 1, value, expected.values[i]);
